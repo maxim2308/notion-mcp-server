@@ -13,7 +13,7 @@ const server = new Server(
     { capabilities: { tools: {} } }
 );
 
-// 1. Регистрируем обработчик для вывода списка инструментов
+// 1. Вывод списка инструментов для Qwen Studio
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
         tools: [
@@ -43,7 +43,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     };
 });
 
-// 2. Регистрируем обработчик для выполнения выбранного инструмента
+// 2. Выполнение выбранного инструмента (поиск или чтение)
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     
@@ -51,7 +51,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (name === "search_notion") {
             const response = await notion.search({ query: args.query, page_size: 5 });
             const results = response.results.map(p => {
-                // Извлекаем название страницы из разных возможных структур Notion
                 const titleObj = p.properties?.title || p.properties?.Name;
                 const titleText = titleObj?.title?.[0]?.plain_text || "Без названия";
                 return {
@@ -72,7 +71,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 })
                 .filter(Boolean)
                 .join("\n");
-            return { content: [{ type: "text", text: text || "Страница пуста или содержит сложные блоки" }] };
+            return { content: [{ type: "text", text: text || "Страница пуста" }] };
         }
     } catch (err) {
         return { content: [{ type: "text", text: `Ошибка Notion API: ${err.message}` }], isError: true };
