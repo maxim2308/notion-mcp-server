@@ -1,5 +1,9 @@
 ```js
 import express from "express";
+
+console.log("=== SERVER VERSION TEST ===");
+console.log("FILE LOADED:", import.meta.url);
+
 import { Client } from "@notionhq/client";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
