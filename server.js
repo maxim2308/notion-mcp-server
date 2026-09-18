@@ -1,4 +1,3 @@
-````javascript
 import express from "express";
 import { Client } from "@notionhq/client";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
