@@ -109,8 +109,8 @@ function extractPropertyValue(property) {
             }
 
             return property.date.end
-                ? `${property.date.start} → ${property.date.end}`
-                : property.date.start || "";
+    ? property.date.start + " → " + property.date.end
+    : property.date.start || "";
 
         case "people":
             return (property.people || [])
