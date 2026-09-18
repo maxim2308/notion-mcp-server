@@ -22,255 +22,312 @@ const notion = new Client({
 });
 
 // --------------------------------------------------
-// MCP SERVER
+// CREATE MCP SERVER
 // --------------------------------------------------
 
-const server = new Server(
-    {
-        name: "notion-mcp-qwen",
-        version: "1.0.0"
-    },
-    {
-        capabilities: {
-            tools: {}
-        }
-    }
-);
-
-// --------------------------------------------------
-// TOOLS
-// --------------------------------------------------
-
-server.setRequestHandler(
-    ListToolsRequestSchema,
-    async () => {
-        const tools = [
-            {
-                name: "search_notion",
-                description:
-                    "Search pages and databases in Notion by title or keyword.",
-                inputSchema: {
-                    type: "object",
-                    properties: {
-                        query: {
-                            type: "string",
-                            description:
-                                "Text or keyword to search for in Notion."
-                        }
-                    },
-                    required: ["query"]
-                }
-            },
-
-            {
-                name: "read_page",
-                description:
-                    "Read the text content of a Notion page by page ID.",
-                inputSchema: {
-                    type: "object",
-                    properties: {
-                        page_id: {
-                            type: "string",
-                            description:
-                                "The Notion page ID."
-                        }
-                    },
-                    required: ["page_id"]
-                }
+function createMcpServer() {
+    const server = new Server(
+        {
+            name: "notion-mcp-qwen",
+            version: "1.0.0"
+        },
+        {
+            capabilities: {
+                tools: {}
             }
-        ];
+        }
+    );
 
-        console.log("TOOLS/LIST requested");
-        console.log(
-            "TOOLS/LIST response:",
-            JSON.stringify(tools)
-        );
+    // --------------------------------------------------
+    // TOOLS LIST
+    // --------------------------------------------------
 
-        return {
-            tools
-        };
-    }
-);
+    server.setRequestHandler(
+        ListToolsRequestSchema,
+        async () => {
 
-// --------------------------------------------------
-// TOOL CALLS
-// --------------------------------------------------
+            const tools = [
+                {
+                    name: "search_notion",
+                    description:
+                        "Search pages and databases in Notion by title or keyword.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            query: {
+                                type: "string",
+                                description:
+                                    "Text or keyword to search for in Notion."
+                            }
+                        },
+                        required: ["query"]
+                    }
+                },
 
-server.setRequestHandler(
-    CallToolRequestSchema,
-    async (request) => {
+                {
+                    name: "read_page",
+                    description:
+                        "Read the text content of a Notion page by page ID.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            page_id: {
+                                type: "string",
+                                description:
+                                    "The Notion page ID."
+                            }
+                        },
+                        required: ["page_id"]
+                    }
+                }
+            ];
 
-        const { name, arguments: args = {} } = request.params;
+            console.log("TOOLS/LIST requested");
 
-        try {
+            console.log(
+                "TOOLS/LIST response:",
+                JSON.stringify(tools)
+            );
 
-            // ------------------------------------------
-            // SEARCH NOTION
-            // ------------------------------------------
+            return {
+                tools
+            };
+        }
+    );
 
-            if (name === "search_notion") {
+    // --------------------------------------------------
+    // TOOL CALLS
+    // --------------------------------------------------
 
-                const query = String(args.query || "").trim();
+    server.setRequestHandler(
+        CallToolRequestSchema,
+        async (request) => {
 
-                if (!query) {
+            const {
+                name,
+                arguments: args = {}
+            } = request.params;
+
+            console.log(
+                "TOOL CALL:",
+                name,
+                JSON.stringify(args)
+            );
+
+            try {
+
+                // ------------------------------------------
+                // SEARCH NOTION
+                // ------------------------------------------
+
+                if (name === "search_notion") {
+
+                    const query =
+                        String(args.query || "").trim();
+
+                    if (!query) {
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "Search query cannot be empty."
+                                }
+                            ],
+                            isError: true
+                        };
+                    }
+
+                    console.log(
+                        `Notion search: "${query}"`
+                    );
+
+                    const response =
+                        await notion.search({
+                            query,
+                            page_size: 10
+                        });
+
+                    const results =
+                        response.results.map((item) => {
+
+                            let title = "Untitled";
+
+                            if (item.object === "page") {
+
+                                const properties =
+                                    item.properties || {};
+
+                                for (
+                                    const property
+                                    of Object.values(properties)
+                                ) {
+
+                                    if (
+                                        property &&
+                                        property.type === "title" &&
+                                        Array.isArray(property.title)
+                                    ) {
+
+                                        title =
+                                            property.title[0]
+                                                ?.plain_text ||
+                                            "Untitled";
+
+                                        break;
+                                    }
+                                }
+                            }
+
+                            return {
+                                id: item.id,
+                                object: item.object,
+                                title
+                            };
+                        });
+
+                    console.log(
+                        "Notion search results:",
+                        JSON.stringify(results)
+                    );
+
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: "Search query cannot be empty."
+                                text: JSON.stringify(
+                                    results,
+                                    null,
+                                    2
+                                )
                             }
-                        ],
-                        isError: true
+                        ]
                     };
                 }
 
-                console.log(`Notion search: "${query}"`);
+                // ------------------------------------------
+                // READ PAGE
+                // ------------------------------------------
 
-                const response = await notion.search({
-                    query,
-                    page_size: 10
-                });
+                if (name === "read_page") {
 
-                const results = response.results.map((item) => {
+                    const pageId =
+                        String(args.page_id || "").trim();
 
-                    let title = "Untitled";
+                    if (!pageId) {
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "page_id is required."
+                                }
+                            ],
+                            isError: true
+                        };
+                    }
 
-                    if (item.object === "page") {
+                    console.log(
+                        `Reading Notion page: ${pageId}`
+                    );
 
-                        const properties = item.properties || {};
+                    const response =
+                        await notion.blocks.children.list({
+                            block_id: pageId,
+                            page_size: 100
+                        });
 
-                        for (const property of Object.values(properties)) {
+                    const lines = [];
 
-                            if (
-                                property &&
-                                property.type === "title" &&
-                                Array.isArray(property.title)
-                            ) {
-                                title =
-                                    property.title[0]?.plain_text ||
-                                    "Untitled";
+                    for (
+                        const block
+                        of response.results
+                    ) {
 
-                                break;
+                        const content =
+                            block[block.type];
+
+                        if (!content) continue;
+
+                        if (
+                            Array.isArray(
+                                content.rich_text
+                            )
+                        ) {
+
+                            const text =
+                                content.rich_text
+                                    .map(
+                                        (item) =>
+                                            item.plain_text ||
+                                            ""
+                                    )
+                                    .join("");
+
+                            if (text) {
+                                lines.push(text);
                             }
                         }
                     }
 
+                    const resultText =
+                        lines.length > 0
+                            ? lines.join("\n")
+                            : "Page is empty.";
+
+                    console.log(
+                        "Page read successfully. Characters:",
+                        resultText.length
+                    );
+
                     return {
-                        id: item.id,
-                        object: item.object,
-                        title
+                        content: [
+                            {
+                                type: "text",
+                                text: resultText
+                            }
+                        ]
                     };
-                });
+                }
 
                 return {
                     content: [
                         {
                             type: "text",
-                            text: JSON.stringify(results, null, 2)
+                            text: `Unknown tool: ${name}`
                         }
-                    ]
+                    ],
+                    isError: true
                 };
-            }
 
-            // ------------------------------------------
-            // READ PAGE
-            // ------------------------------------------
+            } catch (error) {
 
-            if (name === "read_page") {
-
-                const pageId = String(args.page_id || "").trim();
-
-                if (!pageId) {
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: "page_id is required."
-                            }
-                        ],
-                        isError: true
-                    };
-                }
-
-                console.log(`Reading Notion page: ${pageId}`);
-
-                const response =
-                    await notion.blocks.children.list({
-                        block_id: pageId,
-                        page_size: 100
-                    });
-
-                const lines = [];
-
-                for (const block of response.results) {
-
-                    const content = block[block.type];
-
-                    if (!content) continue;
-
-                    if (Array.isArray(content.rich_text)) {
-
-                        const text = content.rich_text
-                            .map((item) => item.plain_text || "")
-                            .join("");
-
-                        if (text) {
-                            lines.push(text);
-                        }
-                    }
-                }
+                console.error(
+                    "Notion API error:",
+                    error
+                );
 
                 return {
                     content: [
                         {
                             type: "text",
                             text:
-                                lines.length > 0
-                                    ? lines.join("\n")
-                                    : "Page is empty."
+                                `Notion API error: ${
+                                    error?.message ||
+                                    String(error)
+                                }`
                         }
-                    ]
+                    ],
+                    isError: true
                 };
             }
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Unknown tool: ${name}`
-                    }
-                ],
-                isError: true
-            };
-
-        } catch (error) {
-
-            console.error(
-                "Notion API error:",
-                error
-            );
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Notion API error: ${
-                            error?.message || String(error)
-                        }`
-                    }
-                ],
-                isError: true
-            };
         }
-    }
-);
+    );
+
+    return server;
+}
 
 // --------------------------------------------------
 // SSE TRANSPORTS
 // --------------------------------------------------
-
-// IMPORTANT:
-// We need one transport per Qwen SSE session.
 
 const transports = new Map();
 
@@ -282,13 +339,26 @@ app.get("/sse", async (req, res) => {
 
     console.log("=================================");
     console.log("New SSE connection");
-    console.log("User-Agent:", req.headers["user-agent"]);
-    console.log("Origin:", req.headers.origin);
+    console.log(
+        "User-Agent:",
+        req.headers["user-agent"]
+    );
+    console.log(
+        "Origin:",
+        req.headers.origin
+    );
     console.log("=================================");
+
+    let server;
+    let transport;
 
     try {
 
-        const transport =
+        // IMPORTANT:
+        // Every SSE connection gets its OWN MCP server.
+        server = createMcpServer();
+
+        transport =
             new SSEServerTransport(
                 "/messages",
                 res
@@ -296,7 +366,10 @@ app.get("/sse", async (req, res) => {
 
         transports.set(
             transport.sessionId,
-            transport
+            {
+                transport,
+                server
+            }
         );
 
         console.log(
@@ -304,7 +377,6 @@ app.get("/sse", async (req, res) => {
             transport.sessionId
         );
 
-        // Remove transport when connection closes
         res.on("close", () => {
 
             console.log(
@@ -315,9 +387,20 @@ app.get("/sse", async (req, res) => {
             transports.delete(
                 transport.sessionId
             );
+
+            // Close this MCP server instance.
+            if (server) {
+                server.close().catch((error) => {
+                    console.error(
+                        "Error closing MCP server:",
+                        error
+                    );
+                });
+            }
         });
 
         transport.onerror = (error) => {
+
             console.error(
                 "SSE transport error:",
                 error
@@ -338,8 +421,19 @@ app.get("/sse", async (req, res) => {
             error
         );
 
+        if (
+            transport &&
+            transport.sessionId
+        ) {
+            transports.delete(
+                transport.sessionId
+            );
+        }
+
         if (!res.headersSent) {
-            res.status(500).end("SSE connection failed");
+            res
+                .status(500)
+                .end("SSE connection failed");
         }
     }
 });
@@ -355,7 +449,8 @@ app.post(
     }),
     async (req, res) => {
 
-        const sessionId = req.query.sessionId;
+        const sessionId =
+            req.query.sessionId;
 
         console.log(
             "MCP message received. sessionId:",
@@ -363,15 +458,16 @@ app.post(
         );
 
         if (!sessionId) {
+
             return res
                 .status(400)
                 .send("Missing sessionId");
         }
 
-        const transport =
+        const session =
             transports.get(sessionId);
 
-        if (!transport) {
+        if (!session) {
 
             console.error(
                 "Unknown session:",
@@ -390,15 +486,7 @@ app.post(
 
         try {
 
-            // IMPORTANT:
-            // Do NOT use:
-            //
-            // transport.handleMessage(req, res)
-            //
-            // We must use handlePostMessage and
-            // explicitly pass the parsed body.
-
-            await transport.handlePostMessage(
+            await session.transport.handlePostMessage(
                 req,
                 res,
                 req.body
@@ -412,9 +500,12 @@ app.post(
             );
 
             if (!res.headersSent) {
+
                 res
                     .status(500)
-                    .send("MCP message processing failed");
+                    .send(
+                        "MCP message processing failed"
+                    );
             }
         }
     }
