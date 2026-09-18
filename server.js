@@ -44,42 +44,50 @@ const server = new Server(
 server.setRequestHandler(
     ListToolsRequestSchema,
     async () => {
-        return {
-            tools: [
-                {
-                    name: "search_notion",
-                    description:
-                        "Search pages and databases in Notion by title or keyword.",
-                    inputSchema: {
-                        type: "object",
-                        properties: {
-                            query: {
-                                type: "string",
-                                description:
-                                    "Text or keyword to search for in Notion."
-                            }
-                        },
-                        required: ["query"]
-                    }
-                },
-
-                {
-                    name: "read_page",
-                    description:
-                        "Read the text content of a Notion page by page ID.",
-                    inputSchema: {
-                        type: "object",
-                        properties: {
-                            page_id: {
-                                type: "string",
-                                description:
-                                    "The Notion page ID."
-                            }
-                        },
-                        required: ["page_id"]
-                    }
+        const tools = [
+            {
+                name: "search_notion",
+                description:
+                    "Search pages and databases in Notion by title or keyword.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        query: {
+                            type: "string",
+                            description:
+                                "Text or keyword to search for in Notion."
+                        }
+                    },
+                    required: ["query"]
                 }
-            ]
+            },
+
+            {
+                name: "read_page",
+                description:
+                    "Read the text content of a Notion page by page ID.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        page_id: {
+                            type: "string",
+                            description:
+                                "The Notion page ID."
+                        }
+                    },
+                    required: ["page_id"]
+                }
+            }
+        ];
+
+        console.log("TOOLS/LIST requested");
+        console.log(
+            "TOOLS/LIST response:",
+            JSON.stringify(tools)
+        );
+
+        return {
+            tools
         };
     }
 );
