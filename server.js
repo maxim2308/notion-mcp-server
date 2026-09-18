@@ -1,7 +1,7 @@
-const express = require("express");
-const { Client } = require("@notionhq/client");
-const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
-const { SSEServerTransport } = require("@modelcontextprotocol/sdk/server/sse.js");
+import express from 'express';
+import { Client } from '@notionhq/client';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 const app = express();
 const notion = new Client({ auth: process.env.NOTION_API_TOKEN });
