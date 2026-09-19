@@ -683,15 +683,16 @@ function verifyPageProperties(page, requestedProperties, schema) {
 
     const actualValue = extractPropertyValue(actualProperty);
 
-if (!valuesEqual(expected, actualValue, schemaProperty)) {
-  mismatches.push({
-    property: propertyName,
-    expected,
-    actual: actualValue
-  });
-}
+    if (!valuesEqual(expected, actualValue, schemaProperty)) {
+      mismatches.push({
+        property: propertyName,
+        expected,
+        actual: actualValue
+      });
+    }
+  }
 
-    return {
+  return {
     verified: mismatches.length === 0,
     mismatches,
     actual
@@ -1425,11 +1426,11 @@ async function createMcpServer() {
             }
           }
 
-          const verification = await verifyPageProperties(
-            response.id,
-            args.properties,
-            schema
-          );
+          const verification = await verifyPage(
+  response.id,
+  args.properties,
+  schema
+);
 
           if (!verification.verified) {
             return toolResult({
