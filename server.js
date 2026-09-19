@@ -1481,11 +1481,11 @@ async function createMcpServer() {
             properties
           });
 
-          const verification = await verifyPageProperties(
-            response.id,
-            args.properties,
-            schema
-          );
+          const verification = await verifyPage(
+  updated.id,
+  args.properties,
+  schema
+);
 
           if (!verification.verified) {
             return toolResult({
@@ -1594,11 +1594,11 @@ async function createMcpServer() {
               }
             }
 
-            const verification = await verifyPageProperties(
-              updated.id,
-              args.properties,
-              schema
-            );
+            const verification = await verifyPage(
+  response.id,
+  args.properties,
+  schema
+);
 
             return toolResult({
               success: verification.verified,
@@ -1633,11 +1633,11 @@ async function createMcpServer() {
             }
           }
 
-          const verification = await verifyPageProperties(
-            created.id,
-            args.properties,
-            schema
-          );
+          const verification = await verifyPage(
+  args.page_id,
+  args.properties,
+  schema
+);
 
           return toolResult({
             success: verification.verified,
