@@ -1,6 +1,4 @@
-from pathlib import Path
-
-server = r'''import express from "express";
+import express from "express";
 import { Client } from "@notionhq/client";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -444,6 +442,32 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 
     throw new Error(`Property "${propertyName}" expects a date string or date object.`);
   }
+      if (typeof value === "string") {
+      return {
+        date: {
+          start: value,
+          end: null,
+          time_zone: null
+        }
+      };
+    }
+
+    if (typeof value === "object" && value !== null) {
+      if (!value.start) {
+        throw new Error(`Date property "${propertyName}" requires "start".`);
+      }
+
+      return {
+        date: {
+          start: String(value.start),
+          end: value.end ? String(value.end) : null,
+          time_zone: value.time_zone || null
+        }
+      };
+    }
+
+    throw new Error(`Property "${propertyName}" expects a date string or date object.`);
+  }
 
   if (type === "relation") {
     let ids;
@@ -524,8 +548,10 @@ function buildSchemaAwareProperties(input, schema) {
   const schemaProperties = getSchemaProperties(schema);
   const result = {};
 
-  for (const propertyName of Object.keys(input)) {
-    if (!Object.prototype.hasOwnProperty.call(schemaProperties, propertyName)) {
+  for (const [propertyName, value] of Object.entries(input)) {
+    const schemaProperty = schemaProperties[propertyName];
+
+    if (!schemaProperty) {
       throw new Error(
         `Unknown property "${propertyName}". Available properties: ${Object.keys(
           schemaProperties
@@ -534,8 +560,8 @@ function buildSchemaAwareProperties(input, schema) {
     }
 
     result[propertyName] = normalizePropertyValue(
-      input[propertyName],
-      schemaProperties[propertyName],
+      value,
+      schemaProperty,
       propertyName
     );
   }
@@ -544,42 +570,60 @@ function buildSchemaAwareProperties(input, schema) {
 }
 
 function semanticValue(value, schemaProperty) {
-  const type = schemaProperty?.type;
+  if (!schemaProperty) return value;
 
-  if (value === null || value === undefined) return null;
+  const type = schemaProperty.type;
 
-  if (type === "title" || type === "rich_text" || type === "select" || type === "status") {
-    if (typeof value === "object" && value !== null && "name" in value) {
-      return String(value.name);
+  if (type === "title" || type === "rich_text") {
+    return textValue(value);
+  }
+
+  if (type === "select" || type === "status") {
+    if (value === null || value === undefined) return null;
+
+    if (typeof value === "object" && value !== null) {
+      return value.name || null;
     }
+
     return String(value);
   }
 
   if (type === "multi_select") {
-    return (Array.isArray(value) ? value : [value])
-      .map(String)
-      .sort();
+    if (value === null || value === undefined) return [];
+
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item)).sort();
+    }
+
+    return [String(value)].sort();
   }
 
-  if (type === "relation") {
-    const ids =
-      Array.isArray(value)
-        ? value
-        : value && Array.isArray(value.ids)
-          ? value.ids
-          : [];
-    return ids.map(String).sort();
+  if (type === "number") {
+    return value === null || value === undefined ? null : Number(value);
   }
 
-  if (type === "number") return Number(value);
-  if (type === "checkbox") return Boolean(value);
-  if (type === "url" || type === "email" || type === "phone_number") {
-    return value === "" ? null : String(value);
+  if (type === "checkbox") {
+    return Boolean(value);
+  }
+
+  if (
+    type === "url" ||
+    type === "email" ||
+    type === "phone_number"
+  ) {
+    return value === null || value === undefined || value === ""
+      ? null
+      : String(value);
   }
 
   if (type === "date") {
+    if (value === null || value === undefined) return null;
+
     if (typeof value === "string") {
-      return { start: value, end: null };
+      return {
+        start: value,
+        end: null
+      };
     }
 
     return {
@@ -588,54 +632,109 @@ function semanticValue(value, schemaProperty) {
     };
   }
 
+  if (type === "relation") {
+    if (!Array.isArray(value)) {
+      return value ? [String(value)] : [];
+    }
+
+    return value.map((item) => {
+      if (typeof item === "object" && item !== null) {
+        return String(item.id);
+      }
+
+      return String(item);
+    }).sort();
+  }
+
+  if (type === "people") {
+    if (!Array.isArray(value)) {
+      return value ? [String(value)] : [];
+    }
+
+    return value.map((item) => {
+      if (typeof item === "object" && item !== null) {
+        return String(item.id);
+      }
+
+      return String(item);
+    }).sort();
+  }
+
   return value;
 }
 
 function valuesEqual(expected, actual, schemaProperty) {
-  const a = semanticValue(expected, schemaProperty);
-  const b = semanticValue(actual, schemaProperty);
+  const left = semanticValue(expected, schemaProperty);
+  const right = semanticValue(actual, schemaProperty);
 
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function requestedValuesFromReadback(page, requestedProperties) {
-  const result = {};
-
-  for (const name of Object.keys(requestedProperties || {})) {
-    result[name] = extractPropertyValue(page.properties?.[name]);
-  }
-
-  return result;
-}
-
-async function verifyPageProperties(pageId, requestedProperties, schema) {
-  const page = await notion.pages.retrieve({ page_id: pageId });
-  const schemaProperties = getSchemaProperties(schema);
-  const actual = requestedValuesFromReadback(page, requestedProperties);
-
+function verifyPageProperties(page, requestedProperties, schema) {
   const mismatches = [];
+  const actualProperties = page.properties || {};
+  const schemaProperties = getSchemaProperties(schema);
 
-  for (const name of Object.keys(requestedProperties || {})) {
-    const expected = requestedProperties[name];
-    const actualValue = actual[name];
+  for (const [propertyName, expected] of Object.entries(
+    requestedProperties || {}
+  )) {
+    const schemaProperty = schemaProperties[propertyName];
 
-    if (!valuesEqual(expected, actualValue, schemaProperties[name])) {
+    if (!schemaProperty) {
       mismatches.push({
-        property: name,
-        expected: semanticValue(expected, schemaProperties[name]),
-        actual: semanticValue(actualValue, schemaProperties[name])
+        property: propertyName,
+        expected,
+        actual: null,
+        error: "Property does not exist in schema"
+      });
+      continue;
+    }
+
+    const actualProperty = actualProperties[propertyName];
+
+    if (!actualProperty) {
+      mismatches.push({
+        property: propertyName,
+        expected,
+        actual: null,
+        error: "Property missing from returned page"
+      });
+      continue;
+    }
+
+    const actual = extractPropertyValue(actualProperty);
+
+    if (!valuesEqual(expected, actual, schemaProperty)) {
+      mismatches.push({
+        property: propertyName,
+        expected,
+        actual
       });
     }
   }
 
   return {
     verified: mismatches.length === 0,
-    mismatches,
-    page,
-    actual
+    mismatches
   };
 }
 
+async function verifyPage(pageId, requestedProperties, schema) {
+  const page = await notion.pages.retrieve({
+    page_id: pageId
+  });
+
+  const verification = verifyPageProperties(
+    page,
+    requestedProperties,
+    schema
+  );
+
+  return {
+    page,
+    ...verification
+  };
+}
 async function fetchPageBlocks(pageId) {
   const blocks = [];
   let cursor = undefined;
@@ -743,13 +842,17 @@ function markdownToBlocks(markdown) {
     if (line.trim().startsWith("```")) {
       if (!inCode) {
         inCode = true;
-        codeLanguage = line.trim().substring(3).trim() || "plain text";
+        codeLanguage =
+          line.trim().substring(3).trim() || "plain text";
         codeLines = [];
       } else {
         inCode = false;
-        blocks.push(codeBlock(codeLines.join("\n"), codeLanguage));
+        blocks.push(
+          codeBlock(codeLines.join("\n"), codeLanguage)
+        );
         codeLines = [];
       }
+
       continue;
     }
 
@@ -763,57 +866,81 @@ function markdownToBlocks(markdown) {
     if (!trimmed) continue;
 
     if (trimmed.startsWith("### ")) {
-      blocks.push(headingBlock(trimmed.substring(4), 3));
+      blocks.push(
+        headingBlock(trimmed.substring(4), 3)
+      );
       continue;
     }
 
     if (trimmed.startsWith("## ")) {
-      blocks.push(headingBlock(trimmed.substring(3), 2));
+      blocks.push(
+        headingBlock(trimmed.substring(3), 2)
+      );
       continue;
     }
 
     if (trimmed.startsWith("# ")) {
-      blocks.push(headingBlock(trimmed.substring(2), 1));
+      blocks.push(
+        headingBlock(trimmed.substring(2), 1)
+      );
       continue;
     }
 
     if (trimmed.startsWith("- [ ] ")) {
-      blocks.push(todoBlock(trimmed.substring(6), false));
+      blocks.push(
+        todoBlock(trimmed.substring(6), false)
+      );
       continue;
     }
 
     if (trimmed.startsWith("- [x] ")) {
-      blocks.push(todoBlock(trimmed.substring(6), true));
+      blocks.push(
+        todoBlock(trimmed.substring(6), true)
+      );
+      continue;
+    }
+
+    if (trimmed.startsWith("* ")) {
+      blocks.push(
+        bulletedBlock(trimmed.substring(2))
+      );
       continue;
     }
 
     if (trimmed.startsWith("- ")) {
-      blocks.push(bulletedBlock(trimmed.substring(2)));
+      blocks.push(
+        bulletedBlock(trimmed.substring(2))
+      );
       continue;
     }
 
-    if (/^[0-9]+\\. /.test(trimmed)) {
+    if (/^\d+\.\s+/.test(trimmed)) {
       blocks.push(
-        numberedBlock(trimmed.replace(/^[0-9]+\\. /, ""))
+        numberedBlock(
+          trimmed.replace(/^\d+\.\s+/, "")
+        )
       );
       continue;
     }
 
     if (trimmed.startsWith("> ")) {
-      blocks.push(quoteBlock(trimmed.substring(2)));
+      blocks.push(
+        quoteBlock(trimmed.substring(2))
+      );
       continue;
     }
 
-    blocks.push(paragraphBlock(line));
+    blocks.push(paragraphBlock(trimmed));
   }
 
   if (inCode && codeLines.length > 0) {
-    blocks.push(codeBlock(codeLines.join("\n"), codeLanguage));
+    blocks.push(
+      codeBlock(codeLines.join("\n"), codeLanguage)
+    );
   }
 
   return blocks;
 }
-
 async function appendBlocksInChunks(blockId, blocks) {
   const results = [];
 
@@ -1151,19 +1278,7 @@ async function createMcpServer() {
       };
     }
   );
-
-  server.setRequestHandler(
-    CallToolRequestSchema,
-    async (request) => {
-      const name = request.params.name;
-      const args = request.params.arguments || {};
-      const startedAt = Date.now();
-
-      console.log("[MCP] TOOL START:", name);
-      console.log("[MCP] ARGS:", JSON.stringify(args));
-
-      try {
-        /* ------------------------------ search ----------------------------- */
+          /* ------------------------------ search ----------------------------- */
 
         if (name === "search_notion") {
           const response = await notion.search({
@@ -1773,9 +1888,3 @@ app.listen(PORT, "0.0.0.0", () => {
     `Notion MCP Qwen server v${SERVER_VERSION} listening on port ${PORT}`
   );
 });
-'''
-
-path = Path("/mnt/data/notion-mcp-server-v3.js")
-path.write_text(server, encoding="utf-8")
-print(path)
-print("lines:", len(server.splitlines()))
