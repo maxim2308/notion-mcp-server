@@ -648,6 +648,11 @@ function verifyPageProperties(page, requestedProperties, schema) {
   const mismatches = [];
   const actualProperties = page.properties || {};
   const schemaProperties = getSchemaProperties(schema);
+  const actual = {};
+
+  for (const [propertyName, property] of Object.entries(actualProperties)) {
+    actual[propertyName] = extractPropertyValue(property);
+  }
 
   for (const [propertyName, expected] of Object.entries(
     requestedProperties || {}
@@ -687,9 +692,10 @@ function verifyPageProperties(page, requestedProperties, schema) {
     }
   }
 
-  return {
+    return {
     verified: mismatches.length === 0,
-    mismatches
+    mismatches,
+    actual
   };
 }
 
@@ -1252,6 +1258,13 @@ async function createMcpServer() {
       };
     }
   );
+    server.setRequestHandler(
+    CallToolRequestSchema,
+    async (request) => {
+      const { name, arguments: args = {} } = request.params;
+      const startedAt = Date.now();
+
+      try {
           /* ------------------------------ search ----------------------------- */
 
         if (name === "search_notion") {
