@@ -442,32 +442,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 
     throw new Error(`Property "${propertyName}" expects a date string or date object.`);
   }
-      if (typeof value === "string") {
-      return {
-        date: {
-          start: value,
-          end: null,
-          time_zone: null
-        }
-      };
-    }
-
-    if (typeof value === "object" && value !== null) {
-      if (!value.start) {
-        throw new Error(`Date property "${propertyName}" requires "start".`);
-      }
-
-      return {
-        date: {
-          start: String(value.start),
-          end: value.end ? String(value.end) : null,
-          time_zone: value.time_zone || null
-        }
-      };
-    }
-
-    throw new Error(`Property "${propertyName}" expects a date string or date object.`);
-  }
 
   if (type === "relation") {
     let ids;
