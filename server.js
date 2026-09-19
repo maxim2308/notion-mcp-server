@@ -24,7 +24,7 @@ const notion = new Client({
 });
 
 const sessions = new Map();
-const SERVER_VERSION = "3.0.0";
+const SERVER_VERSION = "3.0.1";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -85,6 +85,7 @@ function extractTitleFromPage(page) {
 
   for (const key of Object.keys(page.properties)) {
     const property = page.properties[key];
+
     if (property && property.type === "title") {
       return extractRichText(property.title);
     }
@@ -128,6 +129,7 @@ function extractPropertyValue(property) {
 
   if (type === "date") {
     if (!property.date) return null;
+
     return {
       start: property.date.start || null,
       end: property.date.end || null,
@@ -137,10 +139,23 @@ function extractPropertyValue(property) {
 
   if (type === "formula") {
     if (!property.formula) return null;
-    if (property.formula.type === "string") return property.formula.string;
-    if (property.formula.type === "number") return property.formula.number;
-    if (property.formula.type === "boolean") return property.formula.boolean;
-    if (property.formula.type === "date") return property.formula.date;
+
+    if (property.formula.type === "string") {
+      return property.formula.string;
+    }
+
+    if (property.formula.type === "number") {
+      return property.formula.number;
+    }
+
+    if (property.formula.type === "boolean") {
+      return property.formula.boolean;
+    }
+
+    if (property.formula.type === "date") {
+      return property.formula.date;
+    }
+
     return null;
   }
 
@@ -222,9 +237,14 @@ async function resolveDataSource(input) {
     throw new Error("Database identifier/name is required.");
   }
 
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value
+    )
+  ) {
     try {
       const schema = await getDataSourceSchema(value);
+
       return {
         data_source_id: value,
         schema,
@@ -245,39 +265,54 @@ async function resolveDataSource(input) {
   );
 
   const exact = sources.find(
-    (item) => normalizeName(extractRichText(item.title)) === normalizeName(value)
+    (item) =>
+      normalizeName(extractRichText(item.title)) === normalizeName(value)
   );
 
-  const candidate = exact || sources[0];
+  if (!exact) {
+    if (sources.length === 0) {
+      throw new Error(
+        `Database/data source "${value}" was not found. Use search_notion to discover it.`
+      );
+    }
 
-  if (!candidate) {
-    throw new Error(
-      `Database/data source "${value}" was not found. Use search_notion to discover it.`
-    );
+    if (sources.length > 1) {
+      const names = sources
+        .map((item) => extractRichText(item.title))
+        .filter(Boolean)
+        .slice(0, 10);
+
+      throw new Error(
+        `Database/data source "${value}" was not matched exactly. ` +
+          `Found multiple candidates: ${names.join(", ")}. ` +
+          `Use the exact database name or data_source_id.`
+      );
+    }
   }
+
+  const candidate = exact || sources[0];
 
   const schema = await getDataSourceSchema(candidate.id);
 
   return {
     data_source_id: candidate.id,
     schema,
-    title: extractRichText(schema.title) || extractRichText(candidate.title) || value
+    title:
+      extractRichText(schema.title) ||
+      extractRichText(candidate.title) ||
+      value
   };
 }
 
 /*
  * Convert the value that an LLM naturally supplies into the exact Notion
  * property payload required by the database schema.
- *
- * The preferred input is intentionally simple:
- *   "Имя": "Иван"
- *   "Статус": "новый"
- *   "Дата": "2026-09-19"
- *   "Взаимодействия": ["page-id-1"]
  */
 function normalizePropertyValue(value, schemaProperty, propertyName) {
   if (!schemaProperty || !schemaProperty.type) {
-    throw new Error(`Property "${propertyName}" does not exist in the database schema.`);
+    throw new Error(
+      `Property "${propertyName}" does not exist in the database schema.`
+    );
   }
 
   const type = schemaProperty.type;
@@ -300,7 +335,9 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       title: [
         {
           type: "text",
-          text: { content: textValue(value) }
+          text: {
+            content: textValue(value)
+          }
         }
       ]
     };
@@ -311,7 +348,9 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       rich_text: [
         {
           type: "text",
-          text: { content: textValue(value) }
+          text: {
+            content: textValue(value)
+          }
         }
       ]
     };
@@ -322,14 +361,22 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       typeof value === "object" && value !== null ? value.name : value;
 
     const options = schemaProperty.select?.options || [];
-    if (options.length > 0 && !options.some((x) => x.name === String(name))) {
+
+    if (
+      options.length > 0 &&
+      !options.some((x) => x.name === String(name))
+    ) {
       throw new Error(
         `Invalid value "${name}" for select property "${propertyName}". ` +
-        `Allowed values: ${options.map((x) => x.name).join(", ")}`
+          `Allowed values: ${options.map((x) => x.name).join(", ")}`
       );
     }
 
-    return { select: { name: String(name) } };
+    return {
+      select: {
+        name: String(name)
+      }
+    };
   }
 
   if (type === "status") {
@@ -337,23 +384,31 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       typeof value === "object" && value !== null ? value.name : value;
 
     const options = schemaProperty.status?.options || [];
-    if (options.length > 0 && !options.some((x) => x.name === String(name))) {
+
+    if (
+      options.length > 0 &&
+      !options.some((x) => x.name === String(name))
+    ) {
       throw new Error(
         `Invalid value "${name}" for status property "${propertyName}". ` +
-        `Allowed values: ${options.map((x) => x.name).join(", ")}`
+          `Allowed values: ${options.map((x) => x.name).join(", ")}`
       );
     }
 
-    return { status: { name: String(name) } };
+    return {
+      status: {
+        name: String(name)
+      }
+    };
   }
 
   if (type === "multi_select") {
-    const values =
-      Array.isArray(value)
-        ? value
-        : typeof value === "object" && Array.isArray(value.values)
-          ? value.values
-          : [value];
+    const values = Array.isArray(value)
+      ? value
+      : typeof value === "object" &&
+          Array.isArray(value.values)
+        ? value.values
+        : [value];
 
     return {
       multi_select: values.map((item) => ({
@@ -364,54 +419,111 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 
   if (type === "number") {
     const numberValue =
-      typeof value === "object" && value !== null && "value" in value
+      typeof value === "object" &&
+      value !== null &&
+      "value" in value
         ? value.value
         : value;
 
-    if (numberValue !== null && Number.isNaN(Number(numberValue))) {
-      throw new Error(`Property "${propertyName}" expects a number.`);
+    if (
+      numberValue !== null &&
+      Number.isNaN(Number(numberValue))
+    ) {
+      throw new Error(
+        `Property "${propertyName}" expects a number.`
+      );
     }
 
     return {
-      number: numberValue === null ? null : Number(numberValue)
+      number:
+        numberValue === null
+          ? null
+          : Number(numberValue)
     };
   }
 
   if (type === "checkbox") {
     const boolValue =
-      typeof value === "object" && value !== null && "value" in value
+      typeof value === "object" &&
+      value !== null &&
+      "value" in value
         ? value.value
         : value;
 
-    return { checkbox: Boolean(boolValue) };
+    if (typeof boolValue === "string") {
+      const normalized = boolValue.trim().toLowerCase();
+
+      if (
+        ["true", "1", "yes", "да", "on"].includes(
+          normalized
+        )
+      ) {
+        return {
+          checkbox: true
+        };
+      }
+
+      if (
+        ["false", "0", "no", "нет", "off", ""].includes(
+          normalized
+        )
+      ) {
+        return {
+          checkbox: false
+        };
+      }
+    }
+
+    return {
+      checkbox: Boolean(boolValue)
+    };
   }
 
   if (type === "url") {
     const urlValue =
-      typeof value === "object" && value !== null && "value" in value
-        ? value.value
-        : value;
-
-    return { url: urlValue === "" ? null : String(urlValue) };
-  }
-
-  if (type === "email") {
-    const emailValue =
-      typeof value === "object" && value !== null && "value" in value
-        ? value.value
-        : value;
-
-    return { email: emailValue === "" ? null : String(emailValue) };
-  }
-
-  if (type === "phone_number") {
-    const phoneValue =
-      typeof value === "object" && value !== null && "value" in value
+      typeof value === "object" &&
+      value !== null &&
+      "value" in value
         ? value.value
         : value;
 
     return {
-      phone_number: phoneValue === "" ? null : String(phoneValue)
+      url:
+        urlValue === ""
+          ? null
+          : String(urlValue)
+    };
+  }
+
+  if (type === "email") {
+    const emailValue =
+      typeof value === "object" &&
+      value !== null &&
+      "value" in value
+        ? value.value
+        : value;
+
+    return {
+      email:
+        emailValue === ""
+          ? null
+          : String(emailValue)
+    };
+  }
+
+  if (type === "phone_number") {
+    const phoneValue =
+      typeof value === "object" &&
+      value !== null &&
+      "value" in value
+        ? value.value
+        : value;
+
+    return {
+      phone_number:
+        phoneValue === ""
+          ? null
+          : String(phoneValue)
     };
   }
 
@@ -426,21 +538,31 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       };
     }
 
-    if (typeof value === "object" && value !== null) {
+    if (
+      typeof value === "object" &&
+      value !== null
+    ) {
       if (!value.start) {
-        throw new Error(`Date property "${propertyName}" requires "start".`);
+        throw new Error(
+          `Date property "${propertyName}" requires "start".`
+        );
       }
 
       return {
         date: {
           start: String(value.start),
-          end: value.end ? String(value.end) : null,
-          time_zone: value.time_zone || null
+          end: value.end
+            ? String(value.end)
+            : null,
+          time_zone:
+            value.time_zone || null
         }
       };
     }
 
-    throw new Error(`Property "${propertyName}" expects a date string or date object.`);
+    throw new Error(
+      `Property "${propertyName}" expects a date string or date object.`
+    );
   }
 
   if (type === "relation") {
@@ -448,7 +570,10 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 
     if (Array.isArray(value)) {
       ids = value;
-    } else if (typeof value === "object" && Array.isArray(value.ids)) {
+    } else if (
+      typeof value === "object" &&
+      Array.isArray(value.ids)
+    ) {
       ids = value.ids;
     } else if (typeof value === "string") {
       ids = [value];
@@ -459,7 +584,9 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
     }
 
     return {
-      relation: ids.map((id) => ({ id: String(id) }))
+      relation: ids.map((id) => ({
+        id: String(id)
+      }))
     };
   }
 
@@ -468,7 +595,10 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 
     if (Array.isArray(value)) {
       ids = value;
-    } else if (typeof value === "object" && Array.isArray(value.ids)) {
+    } else if (
+      typeof value === "object" &&
+      Array.isArray(value.ids)
+    ) {
       ids = value.ids;
     } else if (typeof value === "string") {
       ids = [value];
@@ -479,7 +609,9 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
     }
 
     return {
-      people: ids.map((id) => ({ id: String(id) }))
+      people: ids.map((id) => ({
+        id: String(id)
+      }))
     };
   }
 
@@ -487,9 +619,14 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
     if (
       typeof value === "object" &&
       !Array.isArray(value) &&
-      Object.prototype.hasOwnProperty.call(value, "files")
+      Object.prototype.hasOwnProperty.call(
+        value,
+        "files"
+      )
     ) {
-      return { files: value.files };
+      return {
+        files: value.files
+      };
     }
 
     throw new Error(
@@ -515,15 +652,27 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
 }
 
 function buildSchemaAwareProperties(input, schema) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("properties must be an object keyed by Notion property names.");
+  if (
+    !input ||
+    typeof input !== "object" ||
+    Array.isArray(input)
+  ) {
+    throw new Error(
+      "properties must be an object keyed by Notion property names."
+    );
   }
 
-  const schemaProperties = getSchemaProperties(schema);
+  const schemaProperties =
+    getSchemaProperties(schema);
+
   const result = {};
 
-  for (const [propertyName, value] of Object.entries(input)) {
-    const schemaProperty = schemaProperties[propertyName];
+  for (const [
+    propertyName,
+    value
+  ] of Object.entries(input)) {
+    const schemaProperty =
+      schemaProperties[propertyName];
 
     if (!schemaProperty) {
       throw new Error(
@@ -533,29 +682,47 @@ function buildSchemaAwareProperties(input, schema) {
       );
     }
 
-    result[propertyName] = normalizePropertyValue(
-      value,
-      schemaProperty,
-      propertyName
-    );
+    result[propertyName] =
+      normalizePropertyValue(
+        value,
+        schemaProperty,
+        propertyName
+      );
   }
 
   return result;
 }
 
-function semanticValue(value, schemaProperty) {
+function semanticValue(
+  value,
+  schemaProperty
+) {
   if (!schemaProperty) return value;
 
   const type = schemaProperty.type;
 
-  if (type === "title" || type === "rich_text") {
+  if (
+    type === "title" ||
+    type === "rich_text"
+  ) {
     return textValue(value);
   }
 
-  if (type === "select" || type === "status") {
-    if (value === null || value === undefined) return null;
+  if (
+    type === "select" ||
+    type === "status"
+  ) {
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return null;
+    }
 
-    if (typeof value === "object" && value !== null) {
+    if (
+      typeof value === "object" &&
+      value !== null
+    ) {
       return value.name || null;
     }
 
@@ -563,17 +730,27 @@ function semanticValue(value, schemaProperty) {
   }
 
   if (type === "multi_select") {
-    if (value === null || value === undefined) return [];
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return [];
+    }
 
     if (Array.isArray(value)) {
-      return value.map((item) => String(item)).sort();
+      return value
+        .map((item) => String(item))
+        .sort();
     }
 
     return [String(value)].sort();
   }
 
   if (type === "number") {
-    return value === null || value === undefined ? null : Number(value);
+    return value === null ||
+      value === undefined
+      ? null
+      : Number(value);
   }
 
   if (type === "checkbox") {
@@ -585,13 +762,20 @@ function semanticValue(value, schemaProperty) {
     type === "email" ||
     type === "phone_number"
   ) {
-    return value === null || value === undefined || value === ""
+    return value === null ||
+      value === undefined ||
+      value === ""
       ? null
       : String(value);
   }
 
   if (type === "date") {
-    if (value === null || value === undefined) return null;
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return null;
+    }
 
     if (typeof value === "string") {
       return {
@@ -608,82 +792,137 @@ function semanticValue(value, schemaProperty) {
 
   if (type === "relation") {
     if (!Array.isArray(value)) {
-      return value ? [String(value)] : [];
+      return value
+        ? [String(value)]
+        : [];
     }
 
-    return value.map((item) => {
-      if (typeof item === "object" && item !== null) {
-        return String(item.id);
-      }
+    return value
+      .map((item) => {
+        if (
+          typeof item === "object" &&
+          item !== null
+        ) {
+          return String(item.id);
+        }
 
-      return String(item);
-    }).sort();
+        return String(item);
+      })
+      .sort();
   }
 
   if (type === "people") {
     if (!Array.isArray(value)) {
-      return value ? [String(value)] : [];
+      return value
+        ? [String(value)]
+        : [];
     }
 
-    return value.map((item) => {
-      if (typeof item === "object" && item !== null) {
-        return String(item.id);
-      }
+    return value
+      .map((item) => {
+        if (
+          typeof item === "object" &&
+          item !== null
+        ) {
+          return String(item.id);
+        }
 
-      return String(item);
-    }).sort();
+        return String(item);
+      })
+      .sort();
   }
 
   return value;
 }
 
-function valuesEqual(expected, actual, schemaProperty) {
-  const left = semanticValue(expected, schemaProperty);
-  const right = semanticValue(actual, schemaProperty);
+function valuesEqual(
+  expected,
+  actual,
+  schemaProperty
+) {
+  const left = semanticValue(
+    expected,
+    schemaProperty
+  );
 
-  return JSON.stringify(left) === JSON.stringify(right);
+  const right = semanticValue(
+    actual,
+    schemaProperty
+  );
+
+  return (
+    JSON.stringify(left) ===
+    JSON.stringify(right)
+  );
 }
 
-function verifyPageProperties(page, requestedProperties, schema) {
+function verifyPageProperties(
+  page,
+  requestedProperties,
+  schema
+) {
   const mismatches = [];
-  const actualProperties = page.properties || {};
-  const schemaProperties = getSchemaProperties(schema);
+  const actualProperties =
+    page?.properties || {};
+
+  const schemaProperties =
+    getSchemaProperties(schema);
+
   const actual = {};
 
-  for (const [propertyName, property] of Object.entries(actualProperties)) {
-    actual[propertyName] = extractPropertyValue(property);
-  }
-
-  for (const [propertyName, expected] of Object.entries(
+  for (const [
+    propertyName,
+    expected
+  ] of Object.entries(
     requestedProperties || {}
   )) {
-    const schemaProperty = schemaProperties[propertyName];
+    const schemaProperty =
+      schemaProperties[propertyName];
 
     if (!schemaProperty) {
       mismatches.push({
         property: propertyName,
         expected,
         actual: null,
-        error: "Property does not exist in schema"
+        error:
+          "Property does not exist in schema"
       });
+
       continue;
     }
 
-    const actualProperty = actualProperties[propertyName];
+    const actualProperty =
+      actualProperties[propertyName];
 
     if (!actualProperty) {
       mismatches.push({
         property: propertyName,
         expected,
         actual: null,
-        error: "Property missing from returned page"
+        error:
+          "Property missing from returned page"
       });
+
+      actual[propertyName] = null;
+
       continue;
     }
 
-    const actualValue = extractPropertyValue(actualProperty);
+    const actualValue =
+      extractPropertyValue(
+        actualProperty
+      );
 
-    if (!valuesEqual(expected, actualValue, schemaProperty)) {
+    actual[propertyName] =
+      actualValue;
+
+    if (
+      !valuesEqual(
+        expected,
+        actualValue,
+        schemaProperty
+      )
+    ) {
       mismatches.push({
         property: propertyName,
         expected,
@@ -693,44 +932,95 @@ function verifyPageProperties(page, requestedProperties, schema) {
   }
 
   return {
-    verified: mismatches.length === 0,
+    verified:
+      mismatches.length === 0,
     mismatches,
     actual
   };
 }
 
-async function verifyPage(pageId, requestedProperties, schema) {
-  const page = await notion.pages.retrieve({
-    page_id: pageId
-  });
+async function verifyPage(
+  pageId,
+  requestedProperties,
+  schema
+) {
+  const page =
+    await notion.pages.retrieve({
+      page_id: pageId
+    });
 
-  const verification = verifyPageProperties(
-    page,
-    requestedProperties,
-    schema
-  );
+  const verification =
+    verifyPageProperties(
+      page,
+      requestedProperties,
+      schema
+    );
 
   return {
     page,
     ...verification
   };
 }
-async function fetchPageBlocks(pageId) {
+
+async function fetchPageBlocks(
+  pageId
+) {
   const blocks = [];
   let cursor = undefined;
 
   do {
-    const response = await notion.blocks.children.list({
-      block_id: pageId,
-      page_size: 100,
-      ...(cursor ? { start_cursor: cursor } : {})
-    });
+    const response =
+      await notion.blocks.children.list({
+        block_id: pageId,
+        page_size: 100,
+        ...(cursor
+          ? {
+              start_cursor: cursor
+            }
+          : {})
+      });
 
-    blocks.push(...(response.results || []));
-    cursor = response.has_more ? response.next_cursor : null;
+    blocks.push(
+      ...(response.results || [])
+    );
+
+    cursor = response.has_more
+      ? response.next_cursor
+      : null;
   } while (cursor);
 
   return blocks;
+}
+
+async function queryAllDataSourcePages(
+  dataSourceId
+) {
+  const pages = [];
+  let cursor = undefined;
+
+  do {
+    const response =
+      await notion.dataSources.query({
+        data_source_id:
+          dataSourceId,
+        page_size: 100,
+        ...(cursor
+          ? {
+              start_cursor: cursor
+            }
+          : {})
+      });
+
+    pages.push(
+      ...(response.results || [])
+    );
+
+    cursor = response.has_more
+      ? response.next_cursor
+      : null;
+  } while (cursor);
+
+  return pages;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -741,7 +1031,9 @@ function richText(text) {
   return [
     {
       type: "text",
-      text: { content: String(text) }
+      text: {
+        content: String(text)
+      }
     }
   ];
 }
@@ -750,17 +1042,25 @@ function paragraphBlock(text) {
   return {
     object: "block",
     type: "paragraph",
-    paragraph: { rich_text: richText(text) }
+    paragraph: {
+      rich_text: richText(text)
+    }
   };
 }
 
-function headingBlock(text, level) {
-  const type = "heading_" + String(level);
+function headingBlock(
+  text,
+  level
+) {
+  const type =
+    "heading_" + String(level);
 
   return {
     object: "block",
     type,
-    [type]: { rich_text: richText(text) }
+    [type]: {
+      rich_text: richText(text)
+    }
   };
 }
 
@@ -768,7 +1068,9 @@ function bulletedBlock(text) {
   return {
     object: "block",
     type: "bulleted_list_item",
-    bulleted_list_item: { rich_text: richText(text) }
+    bulleted_list_item: {
+      rich_text: richText(text)
+    }
   };
 }
 
@@ -776,11 +1078,16 @@ function numberedBlock(text) {
   return {
     object: "block",
     type: "numbered_list_item",
-    numbered_list_item: { rich_text: richText(text) }
+    numbered_list_item: {
+      rich_text: richText(text)
+    }
   };
 }
 
-function todoBlock(text, checked) {
+function todoBlock(
+  text,
+  checked
+) {
   return {
     object: "block",
     type: "to_do",
@@ -795,41 +1102,66 @@ function quoteBlock(text) {
   return {
     object: "block",
     type: "quote",
-    quote: { rich_text: richText(text) }
+    quote: {
+      rich_text: richText(text)
+    }
   };
 }
 
-function codeBlock(text, language) {
+function codeBlock(
+  text,
+  language
+) {
   return {
     object: "block",
     type: "code",
     code: {
       rich_text: richText(text),
-      language: language || "plain text"
+      language:
+        language || "plain text"
     }
   };
 }
 
-function markdownToBlocks(markdown) {
-  const lines = String(markdown || "").split("\n");
+function markdownToBlocks(
+  markdown
+) {
+  const lines =
+    String(markdown || "")
+      .split("\n");
+
   const blocks = [];
 
   let inCode = false;
-  let codeLanguage = "plain text";
+  let codeLanguage =
+    "plain text";
   let codeLines = [];
 
   for (const line of lines) {
-    if (line.trim().startsWith("```")) {
+    if (
+      line.trim().startsWith("```")
+    ) {
       if (!inCode) {
         inCode = true;
+
         codeLanguage =
-          line.trim().substring(3).trim() || "plain text";
+          line
+            .trim()
+            .substring(3)
+            .trim() ||
+          "plain text";
+
         codeLines = [];
       } else {
         inCode = false;
+
         blocks.push(
-          codeBlock(codeLines.join("\n"), codeLanguage)
+          codeBlock(
+            codeLines.join("\n"),
+            codeLanguage
+          )
         );
+
         codeLines = [];
       }
 
@@ -841,99 +1173,176 @@ function markdownToBlocks(markdown) {
       continue;
     }
 
-    const trimmed = line.trim();
+    const trimmed =
+      line.trim();
 
     if (!trimmed) continue;
 
-    if (trimmed.startsWith("### ")) {
+    if (
+      trimmed.startsWith("### ")
+    ) {
       blocks.push(
-        headingBlock(trimmed.substring(4), 3)
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("## ")) {
-      blocks.push(
-        headingBlock(trimmed.substring(3), 2)
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("# ")) {
-      blocks.push(
-        headingBlock(trimmed.substring(2), 1)
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("- [ ] ")) {
-      blocks.push(
-        todoBlock(trimmed.substring(6), false)
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("- [x] ")) {
-      blocks.push(
-        todoBlock(trimmed.substring(6), true)
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("* ")) {
-      blocks.push(
-        bulletedBlock(trimmed.substring(2))
-      );
-      continue;
-    }
-
-    if (trimmed.startsWith("- ")) {
-      blocks.push(
-        bulletedBlock(trimmed.substring(2))
-      );
-      continue;
-    }
-
-    if (/^\d+\.\s+/.test(trimmed)) {
-      blocks.push(
-        numberedBlock(
-          trimmed.replace(/^\d+\.\s+/, "")
+        headingBlock(
+          trimmed.substring(4),
+          3
         )
       );
+
       continue;
     }
 
-    if (trimmed.startsWith("> ")) {
+    if (
+      trimmed.startsWith("## ")
+    ) {
       blocks.push(
-        quoteBlock(trimmed.substring(2))
+        headingBlock(
+          trimmed.substring(3),
+          2
+        )
       );
+
       continue;
     }
 
-    blocks.push(paragraphBlock(trimmed));
+    if (
+      trimmed.startsWith("# ")
+    ) {
+      blocks.push(
+        headingBlock(
+          trimmed.substring(2),
+          1
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      trimmed.startsWith("- [ ] ")
+    ) {
+      blocks.push(
+        todoBlock(
+          trimmed.substring(6),
+          false
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      trimmed.startsWith("- [x] ")
+    ) {
+      blocks.push(
+        todoBlock(
+          trimmed.substring(6),
+          true
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      trimmed.startsWith("* ")
+    ) {
+      blocks.push(
+        bulletedBlock(
+          trimmed.substring(2)
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      trimmed.startsWith("- ")
+    ) {
+      blocks.push(
+        bulletedBlock(
+          trimmed.substring(2)
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      /^\d+\.\s+/.test(trimmed)
+    ) {
+      blocks.push(
+        numberedBlock(
+          trimmed.replace(
+            /^\d+\.\s+/,
+            ""
+          )
+        )
+      );
+
+      continue;
+    }
+
+    if (
+      trimmed.startsWith("> ")
+    ) {
+      blocks.push(
+        quoteBlock(
+          trimmed.substring(2)
+        )
+      );
+
+      continue;
+    }
+
+    blocks.push(
+      paragraphBlock(trimmed)
+    );
   }
 
-  if (inCode && codeLines.length > 0) {
+  if (
+    inCode &&
+    codeLines.length > 0
+  ) {
     blocks.push(
-      codeBlock(codeLines.join("\n"), codeLanguage)
+      codeBlock(
+        codeLines.join("\n"),
+        codeLanguage
+      )
     );
   }
 
   return blocks;
 }
-async function appendBlocksInChunks(blockId, blocks) {
+
+async function appendBlocksInChunks(
+  blockId,
+  blocks
+) {
   const results = [];
 
-  for (let i = 0; i < blocks.length; i += 100) {
-    const chunk = blocks.slice(i, i + 100);
+  for (
+    let i = 0;
+    i < blocks.length;
+    i += 100
+  ) {
+    const chunk =
+      blocks.slice(i, i + 100);
 
-    const response = await notion.blocks.children.append({
-      block_id: blockId,
-      children: chunk
-    });
+    const response =
+      await notion.blocks.children.append(
+        {
+          block_id: blockId,
+          children: chunk
+        }
+      );
 
-    if (response && response.results) {
-      results.push(...response.results);
+    if (
+      response &&
+      response.results
+    ) {
+      results.push(
+        ...response.results
+      );
     }
   }
 
@@ -945,17 +1354,20 @@ async function appendBlocksInChunks(blockId, blocks) {
 /* -------------------------------------------------------------------------- */
 
 async function createMcpServer() {
-  const server = new Server(
-    {
-      name: "notion-mcp-qwen",
-      version: SERVER_VERSION
-    },
-    {
-      capabilities: {
-        tools: {}
+  const server =
+    new Server(
+      {
+        name:
+          "notion-mcp-qwen",
+        version:
+          SERVER_VERSION
+      },
+      {
+        capabilities: {
+          tools: {}
+        }
       }
-    }
-  );
+    );
 
   server.setRequestHandler(
     ListToolsRequestSchema,
@@ -969,69 +1381,102 @@ async function createMcpServer() {
             inputSchema: {
               type: "object",
               properties: {
-                query: { type: "string" },
-                page_size: { type: "number", default: 20 }
+                query: {
+                  type: "string"
+                },
+                page_size: {
+                  type: "number",
+                  default: 20
+                }
               },
-              required: ["query"]
+              required: [
+                "query"
+              ]
             }
           },
 
           {
-            name: "find_database",
+            name:
+              "find_database",
             description:
               "Find a Notion database by name and return its data_source_id and schema. Prefer this over manually guessing IDs.",
             inputSchema: {
               type: "object",
               properties: {
-                name: { type: "string" }
+                name: {
+                  type: "string"
+                }
               },
-              required: ["name"]
+              required: [
+                "name"
+              ]
             }
           },
 
           {
-            name: "get_database_schema",
+            name:
+              "get_database_schema",
             description:
               "Get the schema of a Notion database/data source, including property names, types and select/status options.",
             inputSchema: {
               type: "object",
               properties: {
-                data_source_id: { type: "string" }
+                data_source_id: {
+                  type: "string"
+                }
               },
-              required: ["data_source_id"]
+              required: [
+                "data_source_id"
+              ]
             }
           },
 
           {
-            name: "find_records",
+            name:
+              "find_records",
             description:
               "Find rows in a Notion database. You can provide a database name or data_source_id and optional property/value filters. Filtering is performed against readable property values.",
             inputSchema: {
               type: "object",
               properties: {
-                database: { type: "string" },
-                data_source_id: { type: "string" },
-                filters: { type: "object" },
-                page_size: { type: "number", default: 100 }
+                database: {
+                  type: "string"
+                },
+                data_source_id: {
+                  type: "string"
+                },
+                filters: {
+                  type: "object"
+                },
+                page_size: {
+                  type: "number",
+                  default: 100
+                }
               }
             }
           },
 
           {
-            name: "get_record",
+            name:
+              "get_record",
             description:
               "Read one Notion database row/page by page_id, including all readable properties and page content blocks.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" }
+                page_id: {
+                  type: "string"
+                }
               },
-              required: ["page_id"]
+              required: [
+                "page_id"
+              ]
             }
           },
 
           {
-            name: "create_record",
+            name:
+              "create_record",
             description:
               "Create a row in a Notion database. IMPORTANT: pass properties as simple natural values matching the database schema, for example {\"Имя\":\"Иван\",\"Компания\":\"ООО Ромашка\",\"Статус\":\"новый\"}. Do NOT construct Notion API title/rich_text/select wrappers. The MCP resolves property types automatically and verifies the created row after writing.",
             inputSchema: {
@@ -1039,11 +1484,13 @@ async function createMcpServer() {
               properties: {
                 database: {
                   type: "string",
-                  description: "Database name, e.g. \"Лиды\"."
+                  description:
+                    "Database name, e.g. \"Лиды\"."
                 },
                 data_source_id: {
                   type: "string",
-                  description: "Optional data_source_id. Use either this or database."
+                  description:
+                    "Optional data_source_id. Use either this or database."
                 },
                 properties: {
                   type: "object",
@@ -1056,33 +1503,48 @@ async function createMcpServer() {
                     "Optional Markdown content to put inside the new page."
                 }
               },
-              required: ["properties"]
+              required: [
+                "properties"
+              ]
             }
           },
 
           {
-            name: "update_record",
+            name:
+              "update_record",
             description:
               "Update properties of an existing Notion row/page. Pass simple natural values such as {\"Статус\":\"написано\"}; the MCP resolves the exact Notion property format and verifies the result.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                properties: { type: "object" }
+                page_id: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                }
               },
-              required: ["page_id", "properties"]
+              required: [
+                "page_id",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "upsert_record",
+            name:
+              "upsert_record",
             description:
               "Create or update a database row without creating a duplicate. First search using match properties, then update the matching row or create a new one. Afterward verify the result.",
             inputSchema: {
               type: "object",
               properties: {
-                database: { type: "string" },
-                data_source_id: { type: "string" },
+                database: {
+                  type: "string"
+                },
+                data_source_id: {
+                  type: "string"
+                },
                 match: {
                   type: "object",
                   description:
@@ -1090,382 +1552,722 @@ async function createMcpServer() {
                 },
                 properties: {
                   type: "object",
-                  description: "Properties to create/update."
+                  description:
+                    "Properties to create/update."
                 },
-                content: { type: "string" }
+                content: {
+                  type: "string"
+                }
               },
-              required: ["match", "properties"]
+              required: [
+                "match",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "verify_record",
+            name:
+              "verify_record",
             description:
               "Verify that specific properties on an existing Notion row contain the requested values. Returns verified=true only when all requested values match.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                properties: { type: "object" }
+                page_id: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                }
               },
-              required: ["page_id", "properties"]
+              required: [
+                "page_id",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "append_note",
+            name:
+              "append_note",
             description:
               "Append readable Markdown/text content to an existing Notion page. Use this instead of constructing raw Notion blocks.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                markdown: { type: "string" }
+                page_id: {
+                  type: "string"
+                },
+                markdown: {
+                  type: "string"
+                }
               },
-              required: ["page_id", "markdown"]
+              required: [
+                "page_id",
+                "markdown"
+              ]
             }
           },
 
           {
-            name: "update_database_schema",
+            name:
+              "update_database_schema",
             description:
               "Add or update columns/properties in an existing Notion database. Use raw Notion schema definitions here because this operation changes the database structure itself.",
             inputSchema: {
               type: "object",
               properties: {
-                data_source_id: { type: "string" },
-                properties: { type: "object" }
+                data_source_id: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                }
               },
-              required: ["data_source_id", "properties"]
+              required: [
+                "data_source_id",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "create_database",
+            name:
+              "create_database",
             description:
               "Create a new Notion database under a page. The properties argument is a database schema, not row values. Use standard Notion property definitions.",
             inputSchema: {
               type: "object",
               properties: {
-                parent_page_id: { type: "string" },
-                title: { type: "string" },
-                properties: { type: "object" }
+                parent_page_id: {
+                  type: "string"
+                },
+                title: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                }
               },
-              required: ["parent_page_id", "title", "properties"]
+              required: [
+                "parent_page_id",
+                "title",
+                "properties"
+              ]
             }
           },
 
-          /* Backward-compatible low-level tools. */
           {
-            name: "query_database",
+            name:
+              "query_database",
             description:
               "Legacy/low-level database query. Use find_records for normal work.",
             inputSchema: {
               type: "object",
               properties: {
-                data_source_id: { type: "string" },
-                page_size: { type: "number", default: 20 }
+                data_source_id: {
+                  type: "string"
+                },
+                page_size: {
+                  type: "number",
+                  default: 20
+                }
               },
-              required: ["data_source_id"]
+              required: [
+                "data_source_id"
+              ]
             }
           },
 
           {
-            name: "read_page",
+            name:
+              "read_page",
             description:
               "Legacy page reader. Use get_record for normal database-row work.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" }
+                page_id: {
+                  type: "string"
+                }
               },
-              required: ["page_id"]
+              required: [
+                "page_id"
+              ]
             }
           },
 
           {
-            name: "create_page",
+            name:
+              "create_page",
             description:
               "Legacy create-page tool. Properties may be supplied as simple values; MCP automatically reads the database schema and converts them to the correct Notion types. Prefer create_record.",
             inputSchema: {
               type: "object",
               properties: {
-                data_source_id: { type: "string" },
-                properties: { type: "object" },
-                children: { type: "array" }
+                data_source_id: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                },
+                children: {
+                  type: "array"
+                }
               },
-              required: ["data_source_id", "properties"]
+              required: [
+                "data_source_id",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "update_page",
+            name:
+              "update_page",
             description:
               "Legacy update-page tool. Properties may be supplied as simple values; MCP automatically reads the database schema and converts them to the correct Notion types. Prefer update_record.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                properties: { type: "object" }
+                page_id: {
+                  type: "string"
+                },
+                properties: {
+                  type: "object"
+                }
               },
-              required: ["page_id", "properties"]
+              required: [
+                "page_id",
+                "properties"
+              ]
             }
           },
 
           {
-            name: "append_blocks",
+            name:
+              "append_blocks",
             description:
               "Append raw Notion blocks to a page. Prefer append_note when possible.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                blocks: { type: "array" }
+                page_id: {
+                  type: "string"
+                },
+                blocks: {
+                  type: "array"
+                }
               },
-              required: ["page_id", "blocks"]
+              required: [
+                "page_id",
+                "blocks"
+              ]
             }
           },
 
           {
-            name: "append_markdown",
+            name:
+              "append_markdown",
             description:
               "Append simple Markdown as Notion blocks. Prefer append_note for normal Qwen usage.",
             inputSchema: {
               type: "object",
               properties: {
-                page_id: { type: "string" },
-                markdown: { type: "string" }
+                page_id: {
+                  type: "string"
+                },
+                markdown: {
+                  type: "string"
+                }
               },
-              required: ["page_id", "markdown"]
+              required: [
+                "page_id",
+                "markdown"
+              ]
             }
           },
 
           {
-            name: "update_block",
+            name:
+              "update_block",
             description:
               "Update an existing Notion block using its block type payload.",
             inputSchema: {
               type: "object",
               properties: {
-                block_id: { type: "string" },
-                type: { type: "string" },
-                block: { type: "object" }
+                block_id: {
+                  type: "string"
+                },
+                type: {
+                  type: "string"
+                },
+                block: {
+                  type: "object"
+                }
               },
-              required: ["block_id", "type", "block"]
+              required: [
+                "block_id",
+                "type",
+                "block"
+              ]
             }
           }
         ]
       };
     }
   );
-    server.setRequestHandler(
+
+  server.setRequestHandler(
     CallToolRequestSchema,
-    async (request) => {
-      const { name, arguments: args = {} } = request.params;
-      const startedAt = Date.now();
+    async function (request) {
+      const name =
+        request.params.name;
+
+      const args =
+        request.params.arguments || {};
+
+      const startedAt =
+        Date.now();
+
+      console.log(
+        `[MCP] TOOL START: ${name}`
+      );
+
+      console.log(
+        "[MCP] TOOL ARGS:",
+        JSON.stringify(args)
+      );
 
       try {
-          /* ------------------------------ search ----------------------------- */
+        /* ------------------------------ search ----------------------------- */
 
-        if (name === "search_notion") {
-          const response = await notion.search({
-            query: args.query,
-            page_size: Math.min(Number(args.page_size || 20), 100)
-          });
+        if (
+          name === "search_notion"
+        ) {
+          const response =
+            await notion.search({
+              query: args.query,
+              page_size:
+                Math.min(
+                  Number(
+                    args.page_size || 20
+                  ),
+                  100
+                )
+            });
 
-          const results = response.results.map((item) => ({
-            id: item.id,
-            object: item.object,
-            title:
-              item.object === "page"
-                ? extractTitleFromPage(item)
-                : item.object === "data_source"
-                  ? extractRichText(item.title)
-                  : ""
-          }));
+          const results =
+            response.results.map(
+              (item) => ({
+                id: item.id,
+                object: item.object,
+                title:
+                  item.object ===
+                  "page"
+                    ? extractTitleFromPage(
+                        item
+                      )
+                    : item.object ===
+                        "data_source"
+                      ? extractRichText(
+                          item.title
+                        )
+                      : ""
+              })
+            );
 
-          return toolResult(results);
+          return toolResult(
+            results
+          );
         }
 
-        if (name === "find_database") {
-          const resolved = await resolveDataSource(args.name);
+        if (
+          name === "find_database"
+        ) {
+          const resolved =
+            await resolveDataSource(
+              args.name
+            );
 
           return toolResult({
             success: true,
-            data_source_id: resolved.data_source_id,
-            title: resolved.title,
-            schema: resolved.schema
+            data_source_id:
+              resolved.data_source_id,
+            title:
+              resolved.title,
+            schema:
+              resolved.schema
           });
         }
 
-        if (name === "get_database_schema") {
-          const response = await getDataSourceSchema(args.data_source_id);
-          return toolResult(response);
+        if (
+          name === "get_database_schema"
+        ) {
+          const response =
+            await getDataSourceSchema(
+              args.data_source_id
+            );
+
+          return toolResult(
+            response
+          );
         }
 
         /* ---------------------------- records ----------------------------- */
 
-        if (name === "find_records") {
-          const resolved = args.data_source_id
-            ? {
-                data_source_id: args.data_source_id,
-                schema: await getDataSourceSchema(args.data_source_id)
+        if (
+          name === "find_records"
+        ) {
+          const resolved =
+            args.data_source_id
+              ? {
+                  data_source_id:
+                    args.data_source_id,
+                  schema:
+                    await getDataSourceSchema(
+                      args.data_source_id
+                    )
+                }
+              : await resolveDataSource(
+                  args.database
+                );
+
+          const pageSize =
+            Math.min(
+              Number(
+                args.page_size || 100
+              ),
+              100
+            );
+
+          const response =
+            await notion.dataSources.query(
+              {
+                data_source_id:
+                  resolved.data_source_id,
+                page_size:
+                  pageSize
               }
-            : await resolveDataSource(args.database);
+            );
 
-          const pageSize = Math.min(Number(args.page_size || 100), 100);
+          let rows =
+            (
+              response.results || []
+            ).map(
+              convertPageToRow
+            );
 
-          const response = await notion.dataSources.query({
-            data_source_id: resolved.data_source_id,
-            page_size: pageSize
-          });
+          const filters =
+            args.filters || {};
 
-          let rows = (response.results || []).map(convertPageToRow);
-          const filters = args.filters || {};
+          for (
+            const key of Object.keys(
+              filters
+            )
+          ) {
+            const expected =
+              filters[key];
 
-          for (const key of Object.keys(filters)) {
-            const expected = filters[key];
-            rows = rows.filter((row) => {
-              const actual = row[key];
+            rows =
+              rows.filter(
+                (row) => {
+                  const actual =
+                    row[key];
 
-              if (Array.isArray(expected)) {
-                return JSON.stringify(
-                  (Array.isArray(actual) ? actual : [actual]).map(String).sort()
-                ) === JSON.stringify(expected.map(String).sort());
-              }
+                  if (
+                    Array.isArray(
+                      expected
+                    )
+                  ) {
+                    return (
+                      JSON.stringify(
+                        (
+                          Array.isArray(
+                            actual
+                          )
+                            ? actual
+                            : [actual]
+                        )
+                          .map(String)
+                          .sort()
+                      ) ===
+                      JSON.stringify(
+                        expected
+                          .map(String)
+                          .sort()
+                      )
+                    );
+                  }
 
-              return String(actual ?? "") === String(expected ?? "");
-            });
+                  return (
+                    String(
+                      actual ?? ""
+                    ) ===
+                    String(
+                      expected ?? ""
+                    )
+                  );
+                }
+              );
           }
 
           return toolResult({
             success: true,
-            data_source_id: resolved.data_source_id,
-            count: rows.length,
-            has_more: response.has_more,
-            next_cursor: response.next_cursor || null,
+            data_source_id:
+              resolved.data_source_id,
+            count:
+              rows.length,
+            has_more:
+              response.has_more,
+            next_cursor:
+              response.next_cursor ||
+              null,
             rows
           });
         }
 
-        if (name === "query_database") {
-          const response = await notion.dataSources.query({
-            data_source_id: args.data_source_id,
-            page_size: Math.min(Number(args.page_size || 20), 100)
-          });
+        if (
+          name === "query_database"
+        ) {
+          const response =
+            await notion.dataSources.query(
+              {
+                data_source_id:
+                  args.data_source_id,
+                page_size:
+                  Math.min(
+                    Number(
+                      args.page_size || 20
+                    ),
+                    100
+                  )
+              }
+            );
 
-          const rows = (response.results || []).map(convertPageToRow);
+          const rows =
+            (
+              response.results || []
+            ).map(
+              convertPageToRow
+            );
 
           return toolResult({
-            data_source_id: args.data_source_id,
-            has_more: response.has_more,
-            next_cursor: response.next_cursor || null,
-            count: rows.length,
+            data_source_id:
+              args.data_source_id,
+            has_more:
+              response.has_more,
+            next_cursor:
+              response.next_cursor ||
+              null,
+            count:
+              rows.length,
             rows
           });
         }
 
-        if (name === "get_record" || name === "read_page") {
-          const page = await notion.pages.retrieve({
-            page_id: args.page_id
-          });
+        if (
+          name === "get_record" ||
+          name === "read_page"
+        ) {
+          const page =
+            await notion.pages.retrieve(
+              {
+                page_id:
+                  args.page_id
+              }
+            );
 
-          if (!page || page.object !== "page") {
-            throw new Error("The supplied ID is not a Notion page.");
+          if (
+            !page ||
+            page.object !== "page"
+          ) {
+            throw new Error(
+              "The supplied ID is not a Notion page."
+            );
           }
 
-          const blocks = await fetchPageBlocks(args.page_id);
+          const blocks =
+            await fetchPageBlocks(
+              args.page_id
+            );
 
           const result = {
             id: page.id,
-            url: page.url || null,
-            title: extractTitleFromPage(page),
+            url:
+              page.url || null,
+            title:
+              extractTitleFromPage(
+                page
+              ),
             properties: {},
             blocks
           };
 
-          for (const key of Object.keys(page.properties || {})) {
-            result.properties[key] = extractPropertyValue(page.properties[key]);
+          for (
+            const key of Object.keys(
+              page.properties || {}
+            )
+          ) {
+            result.properties[
+              key
+            ] =
+              extractPropertyValue(
+                page.properties[key]
+              );
           }
 
-          return toolResult(result);
+          return toolResult(
+            result
+          );
         }
 
-        if (name === "create_record" || name === "create_page") {
+        if (
+          name === "create_record" ||
+          name === "create_page"
+        ) {
           const dataSourceId =
             args.data_source_id ||
-            (args.database
-              ? (await resolveDataSource(args.database)).data_source_id
-              : null);
+            (
+              args.database
+                ? (
+                    await resolveDataSource(
+                      args.database
+                    )
+                  ).data_source_id
+                : null
+            );
 
           if (!dataSourceId) {
-            throw new Error("Provide database or data_source_id.");
+            throw new Error(
+              "Provide database or data_source_id."
+            );
           }
 
-          const schema = await getDataSourceSchema(dataSourceId);
-          const properties = buildSchemaAwareProperties(args.properties, schema);
+          const schema =
+            await getDataSourceSchema(
+              dataSourceId
+            );
+
+          const properties =
+            buildSchemaAwareProperties(
+              args.properties,
+              schema
+            );
 
           const payload = {
             parent: {
-              type: "data_source_id",
-              data_source_id: dataSourceId
+              type:
+                "data_source_id",
+              data_source_id:
+                dataSourceId
             },
             properties
           };
 
-          if (Array.isArray(args.children) && args.children.length > 0) {
-            payload.children = args.children;
+          if (
+            Array.isArray(
+              args.children
+            ) &&
+            args.children.length > 0
+          ) {
+            payload.children =
+              args.children;
           }
 
-          const response = await notion.pages.create(payload);
+          const response =
+            await notion.pages.create(
+              payload
+            );
 
           if (args.content) {
-            const blocks = markdownToBlocks(args.content);
-            if (blocks.length > 0) {
-              await appendBlocksInChunks(response.id, blocks);
+            const blocks =
+              markdownToBlocks(
+                args.content
+              );
+
+            if (
+              blocks.length > 0
+            ) {
+              await appendBlocksInChunks(
+                response.id,
+                blocks
+              );
             }
           }
 
-          const verification = await verifyPage(
-  response.id,
-  args.properties,
-  schema
-);
+          const verification =
+            await verifyPage(
+              response.id,
+              args.properties,
+              schema
+            );
 
-          if (!verification.verified) {
+          if (
+            !verification.verified
+          ) {
             return toolResult({
               success: false,
-              operation: "create_record",
-              id: response.id,
-              url: response.url || null,
+              operation:
+                "create_record",
+              id:
+                response.id,
+              url:
+                response.url ||
+                null,
               verified: false,
-              error: "Page was created, but read-after-write verification failed.",
-              mismatches: verification.mismatches,
-              actual: verification.actual
+              error:
+                "Page was created, but read-after-write verification failed.",
+              mismatches:
+                verification.mismatches,
+              actual:
+                verification.actual
             });
           }
 
           return toolResult({
             success: true,
-            operation: "created",
-            id: response.id,
-            url: response.url || null,
+            operation:
+              "created",
+            id:
+              response.id,
+            url:
+              response.url ||
+              null,
             verified: true,
-            properties: verification.actual,
-            message: "Record created and verified successfully."
+            properties:
+              verification.actual,
+            message:
+              "Record created and verified successfully."
           });
         }
 
-        if (name === "update_record" || name === "update_page") {
-          const current = await notion.pages.retrieve({
-            page_id: args.page_id
-          });
+        if (
+          name === "update_record" ||
+          name === "update_page"
+        ) {
+          const current =
+            await notion.pages.retrieve(
+              {
+                page_id:
+                  args.page_id
+              }
+            );
 
-          if (!current || current.object !== "page") {
-            throw new Error("The supplied ID is not a Notion page.");
+          if (
+            !current ||
+            current.object !==
+              "page"
+          ) {
+            throw new Error(
+              "The supplied ID is not a Notion page."
+            );
           }
 
-          const dataSourceId = current.parent?.data_source_id;
+          const dataSourceId =
+            current.parent
+              ?.data_source_id;
 
           if (!dataSourceId) {
             throw new Error(
@@ -1473,288 +2275,509 @@ async function createMcpServer() {
             );
           }
 
-          const schema = await getDataSourceSchema(dataSourceId);
-          const properties = buildSchemaAwareProperties(args.properties, schema);
+          const schema =
+            await getDataSourceSchema(
+              dataSourceId
+            );
 
-          const response = await notion.pages.update({
-            page_id: args.page_id,
-            properties
-          });
+          const properties =
+            buildSchemaAwareProperties(
+              args.properties,
+              schema
+            );
 
-          const verification = await verifyPage(
-  updated.id,
-  args.properties,
-  schema
-);
+          const response =
+            await notion.pages.update(
+              {
+                page_id:
+                  args.page_id,
+                properties
+              }
+            );
 
-          if (!verification.verified) {
+          const verification =
+            await verifyPage(
+              response.id,
+              args.properties,
+              schema
+            );
+
+          if (
+            !verification.verified
+          ) {
             return toolResult({
               success: false,
-              operation: "update_record",
-              id: response.id,
-              url: response.url || null,
+              operation:
+                "update_record",
+              id:
+                response.id,
+              url:
+                response.url ||
+                null,
               verified: false,
-              error: "Update was sent, but read-after-write verification failed.",
-              mismatches: verification.mismatches,
-              actual: verification.actual
+              error:
+                "Update was sent, but read-after-write verification failed.",
+              mismatches:
+                verification.mismatches,
+              actual:
+                verification.actual
             });
           }
 
           return toolResult({
             success: true,
-            operation: "updated",
-            id: response.id,
-            url: response.url || null,
+            operation:
+              "updated",
+            id:
+              response.id,
+            url:
+              response.url ||
+              null,
             verified: true,
-            properties: verification.actual,
-            message: "Record updated and verified successfully."
+            properties:
+              verification.actual,
+            message:
+              "Record updated and verified successfully."
           });
         }
 
-        if (name === "verify_record") {
-          const current = await notion.pages.retrieve({
-            page_id: args.page_id
-          });
+        if (
+          name === "verify_record"
+        ) {
+          const current =
+            await notion.pages.retrieve(
+              {
+                page_id:
+                  args.page_id
+              }
+            );
 
-          if (!current || current.object !== "page") {
-            throw new Error("The supplied ID is not a Notion page.");
+          if (
+            !current ||
+            current.object !==
+              "page"
+          ) {
+            throw new Error(
+              "The supplied ID is not a Notion page."
+            );
           }
 
-          const dataSourceId = current.parent?.data_source_id;
+          const dataSourceId =
+            current.parent
+              ?.data_source_id;
 
           if (!dataSourceId) {
-            throw new Error("The page has no data_source_id.");
+            throw new Error(
+              "The page has no data_source_id."
+            );
           }
 
-          const schema = await getDataSourceSchema(dataSourceId);
-          const verification = await verifyPageProperties(
-            args.page_id,
+          const schema =
+            await getDataSourceSchema(
+              dataSourceId
+            );
+
+          const verification =
+            await verifyPage(
+              args.page_id,
+              args.properties,
+              schema
+            );
+
+          return toolResult({
+            success: true,
+            verified:
+              verification.verified,
+            id:
+              args.page_id,
+            url:
+              current.url || null,
+            mismatches:
+              verification.mismatches,
+            actual:
+              verification.actual
+          });
+        }
+
+        if (
+          name === "upsert_record"
+        ) {
+          const resolved =
+            args.data_source_id
+              ? {
+                  data_source_id:
+                    args.data_source_id,
+                  schema:
+                    await getDataSourceSchema(
+                      args.data_source_id
+                    )
+                }
+              : await resolveDataSource(
+                  args.database
+                );
+
+          const schema =
+            resolved.schema;
+
+          buildSchemaAwareProperties(
+            args.match,
+            schema
+          );
+
+          buildSchemaAwareProperties(
             args.properties,
             schema
           );
 
-          return toolResult({
-            success: true,
-            verified: verification.verified,
-            id: args.page_id,
-            url: current.url || null,
-            mismatches: verification.mismatches,
-            actual: verification.actual
-          });
-        }
+          const rows =
+            await queryAllDataSourcePages(
+              resolved.data_source_id
+            );
 
-        if (name === "upsert_record") {
-          const resolved = args.data_source_id
-            ? {
-                data_source_id: args.data_source_id,
-                schema: await getDataSourceSchema(args.data_source_id)
+          const match =
+            rows.find(
+              (page) => {
+                for (
+                  const key of Object.keys(
+                    args.match || {}
+                  )
+                ) {
+                  const schemaProperty =
+                    schema.properties?.[
+                      key
+                    ];
+
+                  if (
+                    !schemaProperty
+                  ) {
+                    return false;
+                  }
+
+                  const actual =
+                    extractPropertyValue(
+                      page.properties?.[
+                        key
+                      ]
+                    );
+
+                  if (
+                    !valuesEqual(
+                      args.match[key],
+                      actual,
+                      schemaProperty
+                    )
+                  ) {
+                    return false;
+                  }
+                }
+
+                return true;
               }
-            : await resolveDataSource(args.database);
-
-          const schema = resolved.schema;
-
-          // Validate both match and write properties before touching Notion.
-          buildSchemaAwareProperties(args.match, schema);
-          buildSchemaAwareProperties(args.properties, schema);
-
-          const response = await notion.dataSources.query({
-            data_source_id: resolved.data_source_id,
-            page_size: 100
-          });
-
-          const rows = response.results || [];
-
-          const match = rows.find((page) => {
-            for (const key of Object.keys(args.match || {})) {
-              const schemaProperty = schema.properties?.[key];
-              if (!schemaProperty) return false;
-
-              const actual = extractPropertyValue(page.properties?.[key]);
-
-              if (!valuesEqual(args.match[key], actual, schemaProperty)) {
-                return false;
-              }
-            }
-
-            return true;
-          });
+            );
 
           if (match) {
-            const properties = buildSchemaAwareProperties(args.properties, schema);
+            const properties =
+              buildSchemaAwareProperties(
+                args.properties,
+                schema
+              );
 
-            const updated = await notion.pages.update({
-              page_id: match.id,
-              properties
-            });
+            const updated =
+              await notion.pages.update(
+                {
+                  page_id:
+                    match.id,
+                  properties
+                }
+              );
 
             if (args.content) {
-              const blocks = markdownToBlocks(args.content);
-              if (blocks.length > 0) {
-                await appendBlocksInChunks(updated.id, blocks);
+              const blocks =
+                markdownToBlocks(
+                  args.content
+                );
+
+              if (
+                blocks.length > 0
+              ) {
+                await appendBlocksInChunks(
+                  updated.id,
+                  blocks
+                );
               }
             }
 
-            const verification = await verifyPage(
-  response.id,
-  args.properties,
-  schema
-);
+            const verification =
+              await verifyPage(
+                updated.id,
+                args.properties,
+                schema
+              );
 
             return toolResult({
-              success: verification.verified,
-              operation: "updated_existing",
-              id: updated.id,
-              url: updated.url || null,
-              verified: verification.verified,
-              mismatches: verification.mismatches,
-              actual: verification.actual,
-              message: verification.verified
-                ? "Existing record updated and verified."
-                : "Existing record was updated but verification failed."
+              success:
+                verification.verified,
+              operation:
+                "updated_existing",
+              id:
+                updated.id,
+              url:
+                updated.url ||
+                null,
+              verified:
+                verification.verified,
+              mismatches:
+                verification.mismatches,
+              actual:
+                verification.actual,
+              message:
+                verification.verified
+                  ? "Existing record updated and verified."
+                  : "Existing record was updated but verification failed."
             });
           }
 
-          const properties = buildSchemaAwareProperties(args.properties, schema);
+          const properties =
+            buildSchemaAwareProperties(
+              args.properties,
+              schema
+            );
 
           const payload = {
             parent: {
-              type: "data_source_id",
-              data_source_id: resolved.data_source_id
+              type:
+                "data_source_id",
+              data_source_id:
+                resolved.data_source_id
             },
             properties
           };
 
-          const created = await notion.pages.create(payload);
+          const created =
+            await notion.pages.create(
+              payload
+            );
 
           if (args.content) {
-            const blocks = markdownToBlocks(args.content);
-            if (blocks.length > 0) {
-              await appendBlocksInChunks(created.id, blocks);
+            const blocks =
+              markdownToBlocks(
+                args.content
+              );
+
+            if (
+              blocks.length > 0
+            ) {
+              await appendBlocksInChunks(
+                created.id,
+                blocks
+              );
             }
           }
 
-          const verification = await verifyPage(
-  args.page_id,
-  args.properties,
-  schema
-);
+          const verification =
+            await verifyPage(
+              created.id,
+              args.properties,
+              schema
+            );
 
           return toolResult({
-            success: verification.verified,
-            operation: "created_new",
-            id: created.id,
-            url: created.url || null,
-            verified: verification.verified,
-            mismatches: verification.mismatches,
-            actual: verification.actual,
-            message: verification.verified
-              ? "New record created and verified."
-              : "New record was created but verification failed."
+            success:
+              verification.verified,
+            operation:
+              "created_new",
+            id:
+              created.id,
+            url:
+              created.url ||
+              null,
+            verified:
+              verification.verified,
+            mismatches:
+              verification.mismatches,
+            actual:
+              verification.actual,
+            message:
+              verification.verified
+                ? "New record created and verified."
+                : "New record was created but verification failed."
           });
         }
 
         /* ------------------------------ notes ------------------------------ */
 
-        if (name === "append_note" || name === "append_markdown") {
-          const markdown = args.markdown;
-          const blocks = markdownToBlocks(markdown);
+        if (
+          name === "append_note" ||
+          name === "append_markdown"
+        ) {
+          const markdown =
+            args.markdown;
 
-          if (blocks.length === 0) {
-            throw new Error("No content to append.");
+          const blocks =
+            markdownToBlocks(
+              markdown
+            );
+
+          if (
+            blocks.length === 0
+          ) {
+            throw new Error(
+              "No content to append."
+            );
           }
 
-          const results = await appendBlocksInChunks(
-            args.page_id,
-            blocks
-          );
+          const results =
+            await appendBlocksInChunks(
+              args.page_id,
+              blocks
+            );
 
           return toolResult({
             success: true,
-            appended: results.length,
-            message: "Content appended successfully."
+            appended:
+              results.length,
+            message:
+              "Content appended successfully."
           });
         }
 
-        if (name === "append_blocks") {
-          if (!Array.isArray(args.blocks)) {
-            throw new Error("blocks must be an array.");
+        if (
+          name === "append_blocks"
+        ) {
+          if (
+            !Array.isArray(
+              args.blocks
+            )
+          ) {
+            throw new Error(
+              "blocks must be an array."
+            );
           }
 
-          const results = await appendBlocksInChunks(
-            args.page_id,
-            args.blocks
-          );
+          const results =
+            await appendBlocksInChunks(
+              args.page_id,
+              args.blocks
+            );
 
           return toolResult({
             success: true,
-            appended: results.length,
+            appended:
+              results.length,
             results
           });
         }
 
-        if (name === "update_block") {
+        if (
+          name === "update_block"
+        ) {
           const payload = {};
-          payload[args.type] = args.block;
 
-          const response = await notion.blocks.update({
-            block_id: args.block_id,
-            type: args.type,
-            ...payload
-          });
+          payload[
+            args.type
+          ] = args.block;
+
+          const response =
+            await notion.blocks.update(
+              {
+                block_id:
+                  args.block_id,
+                type:
+                  args.type,
+                ...payload
+              }
+            );
 
           return toolResult({
             success: true,
-            block: response
+            block:
+              response
           });
         }
 
         /* ---------------------------- databases ---------------------------- */
 
-        if (name === "create_database") {
-          const response = await notion.databases.create({
-            parent: {
-              type: "page_id",
-              page_id: args.parent_page_id
-            },
-            title: [
+        if (
+          name === "create_database"
+        ) {
+          const response =
+            await notion.databases.create(
               {
-                type: "text",
-                text: {
-                  content: args.title
+                parent: {
+                  type:
+                    "page_id",
+                  page_id:
+                    args.parent_page_id
+                },
+                title: [
+                  {
+                    type:
+                      "text",
+                    text: {
+                      content:
+                        args.title
+                    }
+                  }
+                ],
+                initial_data_source: {
+                  properties:
+                    args.properties ||
+                    {}
                 }
               }
-            ],
-            initial_data_source: {
-              properties: args.properties || {}
-            }
-          });
+            );
 
           return toolResult({
             success: true,
-            database_id: response.id,
-            data_sources: response.data_sources || [],
-            url: response.url || null,
-            message: "Database created successfully."
+            database_id:
+              response.id,
+            data_sources:
+              response.data_sources ||
+              [],
+            url:
+              response.url ||
+              null,
+            message:
+              "Database created successfully."
           });
         }
 
-        if (name === "update_database_schema") {
-          const response = await notion.dataSources.update({
-            data_source_id: args.data_source_id,
-            properties: args.properties || {}
-          });
+        if (
+          name ===
+          "update_database_schema"
+        ) {
+          const response =
+            await notion.dataSources.update(
+              {
+                data_source_id:
+                  args.data_source_id,
+                properties:
+                  args.properties ||
+                  {}
+              }
+            );
 
           return toolResult({
             success: true,
-            data_source_id: args.data_source_id,
-            schema: response
+            data_source_id:
+              args.data_source_id,
+            schema:
+              response
           });
         }
 
-        throw new Error("Unknown tool: " + name);
+        throw new Error(
+          "Unknown tool: " + name
+        );
       } catch (error) {
-        console.error("[MCP] TOOL ERROR:", error);
-        return toolError(error);
+        console.error(
+          "[MCP] TOOL ERROR:",
+          error
+        );
+
+        return toolError(
+          error
+        );
       } finally {
         console.log(
           `[MCP] TOOL END: ${name} (${Date.now() - startedAt}ms)`
@@ -1770,108 +2793,175 @@ async function createMcpServer() {
 /* HTTP / SSE                                                                 */
 /* -------------------------------------------------------------------------- */
 
-app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "notion-mcp-qwen",
-    transport: "SSE",
-    endpoint: "/sse",
-    version: SERVER_VERSION,
-    capabilities: [
-      "schema-aware record create/update",
-      "upsert",
-      "read-after-write verification",
-      "database discovery by name",
-      "relations",
-      "people",
-      "markdown page content"
-    ]
-  });
-});
+app.get(
+  "/",
+  (req, res) => {
+    res.json({
+      status: "ok",
+      service:
+        "notion-mcp-qwen",
+      transport: "SSE",
+      endpoint: "/sse",
+      version:
+        SERVER_VERSION,
+      capabilities: [
+        "schema-aware record create/update",
+        "upsert",
+        "read-after-write verification",
+        "database discovery by name",
+        "relations",
+        "people",
+        "markdown page content"
+      ]
+    });
+  }
+);
 
-app.get("/sse", async (req, res) => {
-  console.log("[MCP] New SSE connection");
-
-  try {
-    const server = await createMcpServer();
-
-    const transport = new SSEServerTransport(
-      "/messages",
-      res
+app.get(
+  "/sse",
+  async (req, res) => {
+    console.log(
+      "[MCP] New SSE connection"
     );
 
-    const sessionId = transport.sessionId;
+    try {
+      const server =
+        await createMcpServer();
 
-    sessions.set(sessionId, {
-      transport,
-      server
-    });
+      const transport =
+        new SSEServerTransport(
+          "/messages",
+          res
+        );
 
-    console.log("[MCP] SSE session:", sessionId);
+      const sessionId =
+        transport.sessionId;
 
-    res.on("close", async () => {
-      console.log("[MCP] SSE closed:", sessionId);
-      sessions.delete(sessionId);
+      sessions.set(
+        sessionId,
+        {
+          transport,
+          server
+        }
+      );
 
-      try {
-        await server.close();
-      } catch (error) {
-        console.error("[MCP] Server close error:", error);
+      console.log(
+        "[MCP] SSE session:",
+        sessionId
+      );
+
+      res.on(
+        "close",
+        async () => {
+          console.log(
+            "[MCP] SSE closed:",
+            sessionId
+          );
+
+          sessions.delete(
+            sessionId
+          );
+
+          try {
+            await server.close();
+          } catch (error) {
+            console.error(
+              "[MCP] Server close error:",
+              error
+            );
+          }
+        }
+      );
+
+      await server.connect(
+        transport
+      );
+    } catch (error) {
+      console.error(
+        "[MCP] SSE ERROR:",
+        error
+      );
+
+      if (
+        !res.headersSent
+      ) {
+        res.status(500).json({
+          error:
+            error.message
+        });
       }
-    });
-
-    await server.connect(transport);
-  } catch (error) {
-    console.error("[MCP] SSE ERROR:", error);
-
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: error.message
-      });
     }
   }
-});
+);
 
-app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId;
+app.post(
+  "/messages",
+  async (req, res) => {
+    const sessionId =
+      req.query.sessionId;
 
-  console.log("[MCP] POST /messages session:", sessionId);
-
-  if (!sessionId) {
-    return res.status(400).json({
-      error: "Missing sessionId"
-    });
-  }
-
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({
-      error: "Session not found"
-    });
-  }
-
-  try {
-    console.log("[MCP] POST /messages body received");
-    await session.transport.handlePostMessage(
-      req,
-      res,
-      req.body
+    console.log(
+      "[MCP] POST /messages session:",
+      sessionId
     );
-    console.log("[MCP] POST /messages handled");
-  } catch (error) {
-    console.error("[MCP] MESSAGE ERROR:", error);
 
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: error.message
+    if (!sessionId) {
+      return res.status(400).json({
+        error:
+          "Missing sessionId"
       });
     }
-  }
-});
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `Notion MCP Qwen server v${SERVER_VERSION} listening on port ${PORT}`
-  );
-});
+    const session =
+      sessions.get(
+        sessionId
+      );
+
+    if (!session) {
+      return res.status(404).json({
+        error:
+          "Session not found"
+      });
+    }
+
+    try {
+      console.log(
+        "[MCP] POST /messages body received"
+      );
+
+      await session.transport.handlePostMessage(
+        req,
+        res,
+        req.body
+      );
+
+      console.log(
+        "[MCP] POST /messages handled"
+      );
+    } catch (error) {
+      console.error(
+        "[MCP] MESSAGE ERROR:",
+        error
+      );
+
+      if (
+        !res.headersSent
+      ) {
+        res.status(500).json({
+          error:
+            error.message
+        });
+      }
+    }
+  }
+);
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Notion MCP Qwen server v${SERVER_VERSION} listening on port ${PORT}`
+    );
+  }
+);
