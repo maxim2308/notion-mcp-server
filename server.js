@@ -681,16 +681,15 @@ function verifyPageProperties(page, requestedProperties, schema) {
       continue;
     }
 
-    const actual = extractPropertyValue(actualProperty);
+    const actualValue = extractPropertyValue(actualProperty);
 
-    if (!valuesEqual(expected, actual, schemaProperty)) {
-      mismatches.push({
-        property: propertyName,
-        expected,
-        actual
-      });
-    }
-  }
+if (!valuesEqual(expected, actualValue, schemaProperty)) {
+  mismatches.push({
+    property: propertyName,
+    expected,
+    actual: actualValue
+  });
+}
 
     return {
     verified: mismatches.length === 0,
