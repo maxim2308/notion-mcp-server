@@ -1992,11 +1992,12 @@ let rows = pages.map(convertPageToRow);
           }
 
           return toolResult({
-  success: true,
-  data_source_id: resolved.data_source_id,
-  count: rows.length,
-  rows
-});
+    success: true,
+    data_source_id: resolved.data_source_id,
+    count: rows.length,
+    rows
+  });
+}
 
         if (
   name === "query_database"
