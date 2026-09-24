@@ -2426,7 +2426,7 @@ async function createMcpServer() {
           const response =
             await withRetry(() => notion.pages.update({
               page_id: args.page_id,
-              archived: true
+              in_trash: true
             }));
           return toolResult({
             success: true,
