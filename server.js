@@ -993,33 +993,21 @@ async function fetchPageBlocks(
 }
 
 async function queryAllDataSourcePages(
-  dataSourceId
+  dataSourceId,
+  pageSize = 100
 ) {
   const pages = [];
   let cursor = undefined;
-
   do {
     const response =
       await notion.dataSources.query({
-        data_source_id:
-          dataSourceId,
-        page_size: 100,
-        ...(cursor
-          ? {
-              start_cursor: cursor
-            }
-          : {})
+        data_source_id: dataSourceId,
+        page_size: Math.min(Number(pageSize) || 100, 100),
+        ...(cursor ? { start_cursor: cursor } : {})
       });
-
-    pages.push(
-      ...(response.results || [])
-    );
-
-    cursor = response.has_more
-      ? response.next_cursor
-      : null;
+    pages.push(...(response.results || []));
+    cursor = response.has_more ? response.next_cursor : null;
   } while (cursor);
-
   return pages;
 }
 
@@ -2004,58 +1992,26 @@ let rows = pages.map(convertPageToRow);
           }
 
           return toolResult({
-            success: true,
-            data_source_id:
-              resolved.data_source_id,
-            count:
-              rows.length,
-            has_more:
-              response.has_more,
-            next_cursor:
-              response.next_cursor ||
-              null,
-            rows
-          });
-        }
+  success: true,
+  data_source_id: resolved.data_source_id,
+  count: rows.length,
+  rows
+});
 
         if (
-          name === "query_database"
-        ) {
-          const response =
-            await notion.dataSources.query(
-              {
-                data_source_id:
-                  args.data_source_id,
-                page_size:
-                  Math.min(
-                    Number(
-                      args.page_size || 20
-                    ),
-                    100
-                  )
-              }
-            );
-
-          const rows =
-            (
-              response.results || []
-            ).map(
-              convertPageToRow
-            );
-
-          return toolResult({
-            data_source_id:
-              args.data_source_id,
-            has_more:
-              response.has_more,
-            next_cursor:
-              response.next_cursor ||
-              null,
-            count:
-              rows.length,
-            rows
-          });
-        }
+  name === "query_database"
+) {
+  const pages = await queryAllDataSourcePages(
+    args.data_source_id
+  );
+  const rows = pages.map(convertPageToRow);
+  return toolResult({
+    success: true,
+    data_source_id: args.data_source_id,
+    count: rows.length,
+    rows
+  });
+}
 
         if (
           name === "get_record" ||
