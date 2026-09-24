@@ -12,7 +12,6 @@ app.use(express.json({ limit: "4mb" }));
 
 const PORT = process.env.PORT || 10000;
 const NOTION_API_TOKEN = process.env.NOTION_API_TOKEN;
-
 if (!NOTION_API_TOKEN) {
   console.error("ERROR: NOTION_API_TOKEN is not set");
   process.exit(1);
@@ -24,12 +23,60 @@ const notion = new Client({
 });
 
 const sessions = new Map();
-const SERVER_VERSION = "3.0.1";
+const SERVER_VERSION = "3.1.0";
+
+/* -------------------------------------------------------------------------- */
+/* Schema cache                                                               */
+/* -------------------------------------------------------------------------- */
+const schemaCache = new Map();
+const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 минут
+
+function getCachedSchema(dataSourceId) {
+  const entry = schemaCache.get(dataSourceId);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > SCHEMA_CACHE_TTL_MS) {
+    schemaCache.delete(dataSourceId);
+    return null;
+  }
+  return entry.schema;
+}
+
+function setCachedSchema(dataSourceId, schema) {
+  schemaCache.set(dataSourceId, { schema, timestamp: Date.now() });
+  if (schemaCache.size > 200) {
+    const oldestKey = schemaCache.keys().next().value;
+    schemaCache.delete(oldestKey);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Retry wrapper for Notion API (429 / 5xx / network errors)                  */
+/* -------------------------------------------------------------------------- */
+async function withRetry(fn, maxAttempts = 4) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      const status = error?.status || error?.statusCode || error?.code;
+      const isRateLimited = status === 429;
+      const isServerError = typeof status === "number" && status >= 500 && status < 600;
+      const isNetworkError = ["ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "ENOTFOUND"].includes(error?.code);
+      if (!isRateLimited && !isServerError && !isNetworkError) throw error;
+      if (attempt === maxAttempts) break;
+      const retryAfter = error?.headers?.["retry-after"];
+      const backoffMs = retryAfter ? Number(retryAfter) * 1000 : Math.pow(2, attempt - 1) * 1000;
+      console.log(`[MCP] RETRY ${attempt}/${maxAttempts} after ${backoffMs}ms (status=${status})`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+  throw lastError;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
-
 function textValue(value) {
   if (value === null || value === undefined) return "";
   return String(value);
@@ -52,7 +99,6 @@ function toolError(error) {
       : error && error.message
         ? error.message
         : String(error);
-
   return {
     content: [
       {
@@ -69,7 +115,6 @@ function toolError(error) {
 
 function extractRichText(items) {
   if (!Array.isArray(items)) return "";
-
   return items
     .map((item) => {
       if (!item) return "";
@@ -82,116 +127,91 @@ function extractRichText(items) {
 
 function extractTitleFromPage(page) {
   if (!page || !page.properties) return "";
-
   for (const key of Object.keys(page.properties)) {
     const property = page.properties[key];
-
     if (property && property.type === "title") {
       return extractRichText(property.title);
     }
   }
-
   return "";
 }
 
 function extractPropertyValue(property) {
   if (!property) return null;
-
   const type = property.type;
-
   if (type === "title") {
     return extractRichText(property.title);
   }
-
   if (type === "rich_text") {
     return extractRichText(property.rich_text);
   }
-
   if (type === "select") {
     return property.select ? property.select.name : null;
   }
-
   if (type === "multi_select") {
     return Array.isArray(property.multi_select)
       ? property.multi_select.map((item) => item.name)
       : [];
   }
-
   if (type === "status") {
     return property.status ? property.status.name : null;
   }
-
   if (type === "number") return property.number;
   if (type === "checkbox") return property.checkbox;
   if (type === "url") return property.url;
   if (type === "email") return property.email;
   if (type === "phone_number") return property.phone_number;
-
   if (type === "date") {
     if (!property.date) return null;
-
     return {
       start: property.date.start || null,
       end: property.date.end || null,
       time_zone: property.date.time_zone || null
     };
   }
-
   if (type === "formula") {
     if (!property.formula) return null;
-
     if (property.formula.type === "string") {
       return property.formula.string;
     }
-
     if (property.formula.type === "number") {
       return property.formula.number;
     }
-
     if (property.formula.type === "boolean") {
       return property.formula.boolean;
     }
-
     if (property.formula.type === "date") {
       return property.formula.date;
     }
-
     return null;
   }
-
   if (type === "people") {
     return Array.isArray(property.people)
       ? property.people.map((person) => person.name || person.id)
       : [];
   }
-
   if (type === "created_time") return property.created_time;
   if (type === "last_edited_time") return property.last_edited_time;
-
   if (type === "created_by") {
     return property.created_by
       ? property.created_by.name || property.created_by.id
       : null;
   }
-
   if (type === "last_edited_by") {
     return property.last_edited_by
       ? property.last_edited_by.name || property.last_edited_by.id
       : null;
   }
-
   if (type === "relation") {
     return Array.isArray(property.relation)
       ? property.relation.map((item) => item.id)
       : [];
   }
-
   if (type === "files") {
     return Array.isArray(property.files)
       ? property.files.map((file) => file.name || file.type || "")
       : [];
   }
-
   return null;
 }
 
@@ -200,11 +220,9 @@ function convertPageToRow(page) {
     id: page.id,
     url: page.url || null
   };
-
   for (const key of Object.keys(page.properties || {})) {
     row[key] = extractPropertyValue(page.properties[key]);
   }
-
   return row;
 }
 
@@ -220,10 +238,13 @@ async function getDataSourceSchema(dataSourceId) {
   if (!dataSourceId) {
     throw new Error("data_source_id is required.");
   }
-
-  return await notion.dataSources.retrieve({
+  const cached = getCachedSchema(dataSourceId);
+  if (cached) return cached;
+  const schema = await withRetry(() => notion.dataSources.retrieve({
     data_source_id: dataSourceId
-  });
+  }));
+  setCachedSchema(dataSourceId, schema);
+  return schema;
 }
 
 /*
@@ -232,11 +253,9 @@ async function getDataSourceSchema(dataSourceId) {
  */
 async function resolveDataSource(input) {
   const value = textValue(input).trim();
-
   if (!value) {
     throw new Error("Database identifier/name is required.");
   }
-
   if (
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       value
@@ -244,7 +263,6 @@ async function resolveDataSource(input) {
   ) {
     try {
       const schema = await getDataSourceSchema(value);
-
       return {
         data_source_id: value,
         schema,
@@ -254,46 +272,37 @@ async function resolveDataSource(input) {
       // Continue to title search if the value was not actually an ID.
     }
   }
-
-  const response = await notion.search({
+  const response = await withRetry(() => notion.search({
     query: value,
     page_size: 100
-  });
-
+  }));
   const sources = (response.results || []).filter(
     (item) => item.object === "data_source"
   );
-
   const exact = sources.find(
     (item) =>
       normalizeName(extractRichText(item.title)) === normalizeName(value)
   );
-
   if (!exact) {
     if (sources.length === 0) {
       throw new Error(
         `Database/data source "${value}" was not found. Use search_notion to discover it.`
       );
     }
-
     if (sources.length > 1) {
       const names = sources
         .map((item) => extractRichText(item.title))
         .filter(Boolean)
         .slice(0, 10);
-
       throw new Error(
         `Database/data source "${value}" was not matched exactly. ` +
-          `Found multiple candidates: ${names.join(", ")}. ` +
-          `Use the exact database name or data_source_id.`
+        `Found multiple candidates: ${names.join(", ")}. ` +
+        `Use the exact database name or data_source_id.`
       );
     }
   }
-
   const candidate = exact || sources[0];
-
   const schema = await getDataSourceSchema(candidate.id);
-
   return {
     data_source_id: candidate.id,
     schema,
@@ -314,13 +323,10 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       `Property "${propertyName}" does not exist in the database schema.`
     );
   }
-
   const type = schemaProperty.type;
-
   if (value === null || value === undefined) {
     return { [type]: null };
   }
-
   // Allow already-canonical Notion payloads for backward compatibility.
   if (
     typeof value === "object" &&
@@ -329,7 +335,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
   ) {
     return value;
   }
-
   if (type === "title") {
     return {
       title: [
@@ -342,7 +347,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       ]
     };
   }
-
   if (type === "rich_text") {
     return {
       rich_text: [
@@ -355,68 +359,57 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       ]
     };
   }
-
   if (type === "select") {
     const name =
       typeof value === "object" && value !== null ? value.name : value;
-
     const options = schemaProperty.select?.options || [];
-
     if (
       options.length > 0 &&
       !options.some((x) => x.name === String(name))
     ) {
       throw new Error(
         `Invalid value "${name}" for select property "${propertyName}". ` +
-          `Allowed values: ${options.map((x) => x.name).join(", ")}`
+        `Allowed values: ${options.map((x) => x.name).join(", ")}`
       );
     }
-
     return {
       select: {
         name: String(name)
       }
     };
   }
-
   if (type === "status") {
     const name =
       typeof value === "object" && value !== null ? value.name : value;
-
     const options = schemaProperty.status?.options || [];
-
     if (
       options.length > 0 &&
       !options.some((x) => x.name === String(name))
     ) {
       throw new Error(
         `Invalid value "${name}" for status property "${propertyName}". ` +
-          `Allowed values: ${options.map((x) => x.name).join(", ")}`
+        `Allowed values: ${options.map((x) => x.name).join(", ")}`
       );
     }
-
     return {
       status: {
         name: String(name)
       }
     };
   }
-
   if (type === "multi_select") {
     const values = Array.isArray(value)
       ? value
       : typeof value === "object" &&
-          Array.isArray(value.values)
+        Array.isArray(value.values)
         ? value.values
         : [value];
-
     return {
       multi_select: values.map((item) => ({
         name: String(item)
       }))
     };
   }
-
   if (type === "number") {
     const numberValue =
       typeof value === "object" &&
@@ -424,7 +417,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       "value" in value
         ? value.value
         : value;
-
     if (
       numberValue !== null &&
       Number.isNaN(Number(numberValue))
@@ -433,7 +425,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         `Property "${propertyName}" expects a number.`
       );
     }
-
     return {
       number:
         numberValue === null
@@ -441,7 +432,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           : Number(numberValue)
     };
   }
-
   if (type === "checkbox") {
     const boolValue =
       typeof value === "object" &&
@@ -449,10 +439,8 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       "value" in value
         ? value.value
         : value;
-
     if (typeof boolValue === "string") {
       const normalized = boolValue.trim().toLowerCase();
-
       if (
         ["true", "1", "yes", "да", "on"].includes(
           normalized
@@ -462,7 +450,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           checkbox: true
         };
       }
-
       if (
         ["false", "0", "no", "нет", "off", ""].includes(
           normalized
@@ -473,12 +460,10 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         };
       }
     }
-
     return {
       checkbox: Boolean(boolValue)
     };
   }
-
   if (type === "url") {
     const urlValue =
       typeof value === "object" &&
@@ -486,7 +471,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       "value" in value
         ? value.value
         : value;
-
     return {
       url:
         urlValue === ""
@@ -494,7 +478,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           : String(urlValue)
     };
   }
-
   if (type === "email") {
     const emailValue =
       typeof value === "object" &&
@@ -502,7 +485,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       "value" in value
         ? value.value
         : value;
-
     return {
       email:
         emailValue === ""
@@ -510,7 +492,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           : String(emailValue)
     };
   }
-
   if (type === "phone_number") {
     const phoneValue =
       typeof value === "object" &&
@@ -518,7 +499,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       "value" in value
         ? value.value
         : value;
-
     return {
       phone_number:
         phoneValue === ""
@@ -526,7 +506,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           : String(phoneValue)
     };
   }
-
   if (type === "date") {
     if (typeof value === "string") {
       return {
@@ -537,7 +516,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         }
       };
     }
-
     if (
       typeof value === "object" &&
       value !== null
@@ -547,7 +525,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
           `Date property "${propertyName}" requires "start".`
         );
       }
-
       return {
         date: {
           start: String(value.start),
@@ -559,15 +536,12 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         }
       };
     }
-
     throw new Error(
       `Property "${propertyName}" expects a date string or date object.`
     );
   }
-
   if (type === "relation") {
     let ids;
-
     if (Array.isArray(value)) {
       ids = value;
     } else if (
@@ -582,17 +556,14 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         `Relation property "${propertyName}" expects page IDs, e.g. ["page-id"].`
       );
     }
-
     return {
       relation: ids.map((id) => ({
         id: String(id)
       }))
     };
   }
-
   if (type === "people") {
     let ids;
-
     if (Array.isArray(value)) {
       ids = value;
     } else if (
@@ -607,14 +578,12 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         `People property "${propertyName}" expects user IDs.`
       );
     }
-
     return {
       people: ids.map((id) => ({
         id: String(id)
       }))
     };
   }
-
   if (type === "files") {
     if (
       typeof value === "object" &&
@@ -628,12 +597,10 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
         files: value.files
       };
     }
-
     throw new Error(
       `Files property "${propertyName}" requires an explicit Notion files payload.`
     );
   }
-
   if (
     type === "formula" ||
     type === "created_time" ||
@@ -645,7 +612,6 @@ function normalizePropertyValue(value, schemaProperty, propertyName) {
       `Property "${propertyName}" is computed/read-only (${type}) and cannot be written.`
     );
   }
-
   throw new Error(
     `Property "${propertyName}" has unsupported Notion type "${type}".`
   );
@@ -661,19 +627,15 @@ function buildSchemaAwareProperties(input, schema) {
       "properties must be an object keyed by Notion property names."
     );
   }
-
   const schemaProperties =
     getSchemaProperties(schema);
-
   const result = {};
-
   for (const [
     propertyName,
     value
   ] of Object.entries(input)) {
     const schemaProperty =
       schemaProperties[propertyName];
-
     if (!schemaProperty) {
       throw new Error(
         `Unknown property "${propertyName}". Available properties: ${Object.keys(
@@ -681,7 +643,6 @@ function buildSchemaAwareProperties(input, schema) {
         ).join(", ")}`
       );
     }
-
     result[propertyName] =
       normalizePropertyValue(
         value,
@@ -689,7 +650,6 @@ function buildSchemaAwareProperties(input, schema) {
         propertyName
       );
   }
-
   return result;
 }
 
@@ -698,16 +658,13 @@ function semanticValue(
   schemaProperty
 ) {
   if (!schemaProperty) return value;
-
   const type = schemaProperty.type;
-
   if (
     type === "title" ||
     type === "rich_text"
   ) {
     return textValue(value);
   }
-
   if (
     type === "select" ||
     type === "status"
@@ -718,17 +675,14 @@ function semanticValue(
     ) {
       return null;
     }
-
     if (
       typeof value === "object" &&
       value !== null
     ) {
       return value.name || null;
     }
-
     return String(value);
   }
-
   if (type === "multi_select") {
     if (
       value === null ||
@@ -736,27 +690,22 @@ function semanticValue(
     ) {
       return [];
     }
-
     if (Array.isArray(value)) {
       return value
         .map((item) => String(item))
         .sort();
     }
-
     return [String(value)].sort();
   }
-
   if (type === "number") {
     return value === null ||
       value === undefined
       ? null
       : Number(value);
   }
-
   if (type === "checkbox") {
     return Boolean(value);
   }
-
   if (
     type === "url" ||
     type === "email" ||
@@ -768,7 +717,6 @@ function semanticValue(
       ? null
       : String(value);
   }
-
   if (type === "date") {
     if (
       value === null ||
@@ -776,27 +724,23 @@ function semanticValue(
     ) {
       return null;
     }
-
     if (typeof value === "string") {
       return {
         start: value,
         end: null
       };
     }
-
     return {
       start: value.start || null,
       end: value.end || null
     };
   }
-
   if (type === "relation") {
     if (!Array.isArray(value)) {
       return value
         ? [String(value)]
         : [];
     }
-
     return value
       .map((item) => {
         if (
@@ -805,19 +749,16 @@ function semanticValue(
         ) {
           return String(item.id);
         }
-
         return String(item);
       })
       .sort();
   }
-
   if (type === "people") {
     if (!Array.isArray(value)) {
       return value
         ? [String(value)]
         : [];
     }
-
     return value
       .map((item) => {
         if (
@@ -826,12 +767,10 @@ function semanticValue(
         ) {
           return String(item.id);
         }
-
         return String(item);
       })
       .sort();
   }
-
   return value;
 }
 
@@ -844,12 +783,10 @@ function valuesEqual(
     expected,
     schemaProperty
   );
-
   const right = semanticValue(
     actual,
     schemaProperty
   );
-
   return (
     JSON.stringify(left) ===
     JSON.stringify(right)
@@ -864,12 +801,9 @@ function verifyPageProperties(
   const mismatches = [];
   const actualProperties =
     page?.properties || {};
-
   const schemaProperties =
     getSchemaProperties(schema);
-
   const actual = {};
-
   for (const [
     propertyName,
     expected
@@ -878,7 +812,6 @@ function verifyPageProperties(
   )) {
     const schemaProperty =
       schemaProperties[propertyName];
-
     if (!schemaProperty) {
       mismatches.push({
         property: propertyName,
@@ -887,13 +820,10 @@ function verifyPageProperties(
         error:
           "Property does not exist in schema"
       });
-
       continue;
     }
-
     const actualProperty =
       actualProperties[propertyName];
-
     if (!actualProperty) {
       mismatches.push({
         property: propertyName,
@@ -902,20 +832,15 @@ function verifyPageProperties(
         error:
           "Property missing from returned page"
       });
-
       actual[propertyName] = null;
-
       continue;
     }
-
     const actualValue =
       extractPropertyValue(
         actualProperty
       );
-
     actual[propertyName] =
       actualValue;
-
     if (
       !valuesEqual(
         expected,
@@ -930,7 +855,6 @@ function verifyPageProperties(
       });
     }
   }
-
   return {
     verified:
       mismatches.length === 0,
@@ -945,17 +869,15 @@ async function verifyPage(
   schema
 ) {
   const page =
-    await notion.pages.retrieve({
+    await withRetry(() => notion.pages.retrieve({
       page_id: pageId
-    });
-
+    }));
   const verification =
     verifyPageProperties(
       page,
       requestedProperties,
       schema
     );
-
   return {
     page,
     ...verification
@@ -963,67 +885,128 @@ async function verifyPage(
 }
 
 async function fetchPageBlocks(
-  pageId
+  pageId,
+  recursive = false,
+  depth = 0
 ) {
+  const MAX_DEPTH = 3;
   const blocks = [];
   let cursor = undefined;
-
   do {
     const response =
-      await notion.blocks.children.list({
+      await withRetry(() => notion.blocks.children.list({
         block_id: pageId,
         page_size: 100,
         ...(cursor
           ? {
-              start_cursor: cursor
-            }
+            start_cursor: cursor
+          }
           : {})
-      });
-
-    blocks.push(
-      ...(response.results || [])
-    );
-
+      }));
+    for (const block of (response.results || [])) {
+      if (recursive && block.has_children && depth < MAX_DEPTH) {
+        block.children = await fetchPageBlocks(block.id, true, depth + 1);
+      }
+      blocks.push(block);
+    }
     cursor = response.has_more
       ? response.next_cursor
       : null;
   } while (cursor);
-
   return blocks;
 }
 
 async function queryAllDataSourcePages(
   dataSourceId,
-  pageSize = 100
+  pageSize = 100,
+  startCursor = undefined,
+  maxPages = null
 ) {
   const pages = [];
-  let cursor = undefined;
+  let cursor = startCursor;
+  let pagesFetched = 0;
+  let hasMore = false;
+  let nextCursor = null;
   do {
     const response =
-      await notion.dataSources.query({
+      await withRetry(() => notion.dataSources.query({
         data_source_id: dataSourceId,
         page_size: Math.min(Number(pageSize) || 100, 100),
         ...(cursor ? { start_cursor: cursor } : {})
-      });
+      }));
     pages.push(...(response.results || []));
-    cursor = response.has_more ? response.next_cursor : null;
+    hasMore = !!response.has_more;
+    nextCursor = response.next_cursor || null;
+    cursor = nextCursor;
+    pagesFetched++;
+    if (maxPages && pagesFetched >= maxPages) break;
   } while (cursor);
-  return pages;
+  return { pages, has_more: hasMore, next_cursor: nextCursor };
 }
 
 /* -------------------------------------------------------------------------- */
 /* Block helpers                                                              */
 /* -------------------------------------------------------------------------- */
-
 function richText(text) {
-  return [
-    {
-      type: "text",
-      text: {
-        content: String(text)
-      }
-    }
+  const input = String(text || "");
+  const segments = [];
+  const patterns = [
+    { re: /\*\*(.+?)\*\*/g, annotations: { bold: true } },
+    { re: /__(.+?)__/g, annotations: { bold: true } },
+    { re: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, annotations: { italic: true } },
+    { re: /(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, annotations: { italic: true } },
+    { re: /~~(.+?)~~/g, annotations: { strikethrough: true } },
+    { re: /`([^`]+)`/g, annotations: { code: true } }
   ];
+  const matches = [];
+  for (const { re, annotations } of patterns) {
+    let m;
+    while ((m = re.exec(input)) !== null) {
+      matches.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        inner: m[1],
+        annotations
+      });
+      if (m[0].length === 0) re.lastIndex++;
+    }
+  }
+  if (matches.length === 0) {
+    return [{ type: "text", text: { content: input } }];
+  }
+  matches.sort((a, b) => a.start - b.start || b.end - a.end);
+  const filtered = [];
+  let lastEnd = -1;
+  for (const m of matches) {
+    if (m.start >= lastEnd) {
+      filtered.push(m);
+      lastEnd = m.end;
+    }
+  }
+  let cursorPos = 0;
+  for (const m of filtered) {
+    if (m.start > cursorPos) {
+      segments.push({
+        type: "text",
+        text: { content: input.slice(cursorPos, m.start) }
+      });
+    }
+    segments.push({
+      type: "text",
+      text: { content: m.inner },
+      annotations: m.annotations
+    });
+    cursorPos = m.end;
+  }
+  if (cursorPos < input.length) {
+    segments.push({
+      type: "text",
+      text: { content: input.slice(cursorPos) }
+    });
+  }
+  return segments.length > 0
+    ? segments
+    : [{ type: "text", text: { content: input } }];
 }
 
 function paragraphBlock(text) {
@@ -1042,7 +1025,6 @@ function headingBlock(
 ) {
   const type =
     "heading_" + String(level);
-
   return {
     object: "block",
     type,
@@ -1104,7 +1086,12 @@ function codeBlock(
     object: "block",
     type: "code",
     code: {
-      rich_text: richText(text),
+      rich_text: [
+        {
+          type: "text",
+          text: { content: String(text || "") }
+        }
+      ],
       language:
         language || "plain text"
     }
@@ -1117,55 +1104,43 @@ function markdownToBlocks(
   const lines =
     String(markdown || "")
       .split("\n");
-
   const blocks = [];
-
   let inCode = false;
   let codeLanguage =
     "plain text";
   let codeLines = [];
-
   for (const line of lines) {
     if (
       line.trim().startsWith("```")
     ) {
       if (!inCode) {
         inCode = true;
-
         codeLanguage =
           line
             .trim()
             .substring(3)
             .trim() ||
           "plain text";
-
         codeLines = [];
       } else {
         inCode = false;
-
         blocks.push(
           codeBlock(
             codeLines.join("\n"),
             codeLanguage
           )
         );
-
         codeLines = [];
       }
-
       continue;
     }
-
     if (inCode) {
       codeLines.push(line);
       continue;
     }
-
     const trimmed =
       line.trim();
-
     if (!trimmed) continue;
-
     if (
       trimmed.startsWith("### ")
     ) {
@@ -1175,10 +1150,8 @@ function markdownToBlocks(
           3
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("## ")
     ) {
@@ -1188,10 +1161,8 @@ function markdownToBlocks(
           2
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("# ")
     ) {
@@ -1201,10 +1172,8 @@ function markdownToBlocks(
           1
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("- [ ] ")
     ) {
@@ -1214,10 +1183,8 @@ function markdownToBlocks(
           false
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("- [x] ")
     ) {
@@ -1227,10 +1194,8 @@ function markdownToBlocks(
           true
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("* ")
     ) {
@@ -1239,10 +1204,8 @@ function markdownToBlocks(
           trimmed.substring(2)
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("- ")
     ) {
@@ -1251,10 +1214,8 @@ function markdownToBlocks(
           trimmed.substring(2)
         )
       );
-
       continue;
     }
-
     if (
       /^\d+\.\s+/.test(trimmed)
     ) {
@@ -1266,10 +1227,8 @@ function markdownToBlocks(
           )
         )
       );
-
       continue;
     }
-
     if (
       trimmed.startsWith("> ")
     ) {
@@ -1278,15 +1237,12 @@ function markdownToBlocks(
           trimmed.substring(2)
         )
       );
-
       continue;
     }
-
     blocks.push(
       paragraphBlock(trimmed)
     );
   }
-
   if (
     inCode &&
     codeLines.length > 0
@@ -1298,7 +1254,6 @@ function markdownToBlocks(
       )
     );
   }
-
   return blocks;
 }
 
@@ -1307,7 +1262,6 @@ async function appendBlocksInChunks(
   blocks
 ) {
   const results = [];
-
   for (
     let i = 0;
     i < blocks.length;
@@ -1315,15 +1269,13 @@ async function appendBlocksInChunks(
   ) {
     const chunk =
       blocks.slice(i, i + 100);
-
     const response =
-      await notion.blocks.children.append(
+      await withRetry(() => notion.blocks.children.append(
         {
           block_id: blockId,
           children: chunk
         }
-      );
-
+      ));
     if (
       response &&
       response.results
@@ -1333,14 +1285,12 @@ async function appendBlocksInChunks(
       );
     }
   }
-
   return results;
 }
 
 /* -------------------------------------------------------------------------- */
 /* MCP server                                                                 */
 /* -------------------------------------------------------------------------- */
-
 async function createMcpServer() {
   const server =
     new Server(
@@ -1365,7 +1315,7 @@ async function createMcpServer() {
           {
             name: "search_notion",
             description:
-              "Search Notion pages and databases/data sources by title or text. Use this to discover IDs when needed.",
+              "Search Notion pages and databases/data sources by title or text. Use this to discover IDs when needed. Set fuzzy=true for substring search across titles and properties.",
             inputSchema: {
               type: "object",
               properties: {
@@ -1375,6 +1325,10 @@ async function createMcpServer() {
                 page_size: {
                   type: "number",
                   default: 20
+                },
+                fuzzy: {
+                  type: "boolean",
+                  description: "If true, searches by substring across titles and properties instead of Notion's exact-match search."
                 }
               },
               required: [
@@ -1382,7 +1336,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "find_database",
@@ -1400,7 +1353,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "get_database_schema",
@@ -1418,12 +1370,11 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "find_records",
             description:
-              "Find rows in a Notion database. You can provide a database name or data_source_id and optional property/value filters. Filtering is performed against readable property values.",
+              "Find rows in a Notion database. Automatically paginates through all records. Use start_cursor and max_pages for very large databases. Filtering is performed against readable property values.",
             inputSchema: {
               type: "object",
               properties: {
@@ -1439,21 +1390,32 @@ async function createMcpServer() {
                 page_size: {
                   type: "number",
                   default: 100
+                },
+                start_cursor: {
+                  type: "string",
+                  description: "Cursor for pagination. Pass the next_cursor from the previous call."
+                },
+                max_pages: {
+                  type: "number",
+                  description: "Maximum number of pages to fetch (each page has up to 100 records)."
                 }
               }
             }
           },
-
           {
             name:
               "get_record",
             description:
-              "Read one Notion database row/page by page_id, including all readable properties and page content blocks.",
+              "Read one Notion database row/page by page_id, including all readable properties and page content blocks. Use recursive=true to fetch nested blocks.",
             inputSchema: {
               type: "object",
               properties: {
                 page_id: {
                   type: "string"
+                },
+                recursive: {
+                  type: "boolean",
+                  description: "If true, recursively fetch nested blocks (toggles, nested lists, etc)."
                 }
               },
               required: [
@@ -1461,7 +1423,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "create_record",
@@ -1488,7 +1449,7 @@ async function createMcpServer() {
                 content: {
                   type: "string",
                   description:
-                    "Optional Markdown content to put inside the new page."
+                    "Optional Markdown content to put inside the new page. Supports **bold**, *italic*, ~~strike~~ and `code`."
                 }
               },
               required: [
@@ -1496,7 +1457,35 @@ async function createMcpServer() {
               ]
             }
           },
-
+          {
+            name:
+              "create_records_batch",
+            description:
+              "Create multiple rows in a Notion database in parallel. Each item has 'properties' and optional 'content' (Markdown). Max 50 records per batch. Returns per-record results.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                database: {
+                  type: "string",
+                  description: "Database name, e.g. \"Лиды\"."
+                },
+                data_source_id: {
+                  type: "string",
+                  description: "Optional data_source_id."
+                },
+                records: {
+                  type: "array",
+                  description: "Array of objects with 'properties' and optional 'content'.",
+                  items: {
+                    type: "object"
+                  }
+                }
+              },
+              required: [
+                "records"
+              ]
+            }
+          },
           {
             name:
               "update_record",
@@ -1518,7 +1507,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "upsert_record",
@@ -1553,7 +1541,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "verify_record",
@@ -1575,12 +1562,29 @@ async function createMcpServer() {
               ]
             }
           },
-
+          {
+            name:
+              "delete_record",
+            description:
+              "Archive (soft-delete) a Notion page/record. The page disappears from database views but can be restored from Notion's trash.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                page_id: {
+                  type: "string",
+                  description: "The ID of the page/record to archive."
+                }
+              },
+              required: [
+                "page_id"
+              ]
+            }
+          },
           {
             name:
               "append_note",
             description:
-              "Append readable Markdown/text content to an existing Notion page. Use this instead of constructing raw Notion blocks.",
+              "Append readable Markdown/text content to an existing Notion page. Supports **bold**, *italic*, ~~strike~~ and `code` inline styles. Use this instead of constructing raw Notion blocks.",
             inputSchema: {
               type: "object",
               properties: {
@@ -1597,7 +1601,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "update_database_schema",
@@ -1619,7 +1622,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "create_database",
@@ -1645,12 +1647,22 @@ async function createMcpServer() {
               ]
             }
           },
-
+          {
+            name:
+              "clear_schema_cache",
+            description:
+              "Clear the in-memory cache of database schemas. Use if the schema was changed in Notion but MCP still sees the old one.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              required: []
+            }
+          },
           {
             name:
               "query_database",
             description:
-              "Legacy/low-level database query. Use find_records for normal work.",
+              "Legacy/low-level database query. Automatically paginates through all records. Use find_records for normal work.",
             inputSchema: {
               type: "object",
               properties: {
@@ -1659,7 +1671,7 @@ async function createMcpServer() {
                 },
                 page_size: {
                   type: "number",
-                  default: 20
+                  default: 100
                 }
               },
               required: [
@@ -1667,7 +1679,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "read_page",
@@ -1685,7 +1696,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "create_page",
@@ -1710,7 +1720,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "update_page",
@@ -1732,7 +1741,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "append_blocks",
@@ -1754,7 +1762,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "append_markdown",
@@ -1776,7 +1783,6 @@ async function createMcpServer() {
               ]
             }
           },
-
           {
             name:
               "update_block",
@@ -1812,31 +1818,38 @@ async function createMcpServer() {
     async function (request) {
       const name =
         request.params.name;
-
       const args =
         request.params.arguments || {};
-
       const startedAt =
         Date.now();
-
       console.log(
         `[MCP] TOOL START: ${name}`
       );
-
       console.log(
         "[MCP] TOOL ARGS:",
         JSON.stringify(args)
       );
-
       try {
-        /* ------------------------------ search ----------------------------- */
+        /* ------------------------------ cache ------------------------------ */
+        if (name === "clear_schema_cache") {
+          const size = schemaCache.size;
+          schemaCache.clear();
+          return toolResult({
+            success: true,
+            cleared: size,
+            message: `Cleared ${size} cached schema(s).`
+          });
+        }
 
+        /* ------------------------------ search ----------------------------- */
         if (
           name === "search_notion"
         ) {
+          const fuzzy = !!args.fuzzy;
+          const queryText = String(args.query || "");
           const response =
-            await notion.search({
-              query: args.query,
+            await withRetry(() => notion.search({
+              query: fuzzy ? "" : args.query,
               page_size:
                 Math.min(
                   Number(
@@ -1844,33 +1857,47 @@ async function createMcpServer() {
                   ),
                   100
                 )
-            });
-
-          const results =
+            }));
+          let results =
             response.results.map(
               (item) => ({
                 id: item.id,
                 object: item.object,
                 title:
                   item.object ===
-                  "page"
+                    "page"
                     ? extractTitleFromPage(
-                        item
-                      )
+                      item
+                    )
                     : item.object ===
-                        "data_source"
+                      "data_source"
                       ? extractRichText(
-                          item.title
-                        )
-                      : ""
+                        item.title
+                      )
+                      : "",
+                raw: item
               })
             );
-
+          if (fuzzy && queryText) {
+            const needle = queryText.trim().toLowerCase();
+            results = results.filter((r) => {
+              if ((r.title || "").toLowerCase().includes(needle)) return true;
+              const props = r.raw?.properties || {};
+              for (const key of Object.keys(props)) {
+                const val = extractPropertyValue(props[key]);
+                if (val && String(val).toLowerCase().includes(needle)) return true;
+              }
+              return false;
+            });
+          }
           return toolResult(
-            results
+            results.map((r) => ({
+              id: r.id,
+              object: r.object,
+              title: r.title
+            }))
           );
         }
-
         if (
           name === "find_database"
         ) {
@@ -1878,7 +1905,6 @@ async function createMcpServer() {
             await resolveDataSource(
               args.name
             );
-
           return toolResult({
             success: true,
             data_source_id:
@@ -1889,7 +1915,6 @@ async function createMcpServer() {
               resolved.schema
           });
         }
-
         if (
           name === "get_database_schema"
         ) {
@@ -1897,31 +1922,27 @@ async function createMcpServer() {
             await getDataSourceSchema(
               args.data_source_id
             );
-
           return toolResult(
             response
           );
         }
-
         /* ---------------------------- records ----------------------------- */
-
         if (
           name === "find_records"
         ) {
           const resolved =
             args.data_source_id
               ? {
-                  data_source_id:
-                    args.data_source_id,
-                  schema:
-                    await getDataSourceSchema(
-                      args.data_source_id
-                    )
-                }
+                data_source_id:
+                  args.data_source_id,
+                schema:
+                  await getDataSourceSchema(
+                    args.data_source_id
+                  )
+              }
               : await resolveDataSource(
-                  args.database
-                );
-
+                args.database
+              );
           const pageSize =
             Math.min(
               Number(
@@ -1929,17 +1950,17 @@ async function createMcpServer() {
               ),
               100
             );
-
-          const pages = await queryAllDataSourcePages(
-  resolved.data_source_id,
-  pageSize
-);
-
-let rows = pages.map(convertPageToRow);
-
+          const startCursor = args.start_cursor || undefined;
+          const maxPages = args.max_pages ? Number(args.max_pages) : null;
+          const queryResult = await queryAllDataSourcePages(
+            resolved.data_source_id,
+            pageSize,
+            startCursor,
+            maxPages
+          );
+          let rows = queryResult.pages.map(convertPageToRow);
           const filters =
             args.filters || {};
-
           for (
             const key of Object.keys(
               filters
@@ -1947,13 +1968,11 @@ let rows = pages.map(convertPageToRow);
           ) {
             const expected =
               filters[key];
-
             rows =
               rows.filter(
                 (row) => {
                   const actual =
                     row[key];
-
                   if (
                     Array.isArray(
                       expected
@@ -1978,7 +1997,6 @@ let rows = pages.map(convertPageToRow);
                       )
                     );
                   }
-
                   return (
                     String(
                       actual ?? ""
@@ -1990,42 +2008,42 @@ let rows = pages.map(convertPageToRow);
                 }
               );
           }
-
           return toolResult({
-    success: true,
-    data_source_id: resolved.data_source_id,
-    count: rows.length,
-    rows
-  });
-}
-
+            success: true,
+            data_source_id: resolved.data_source_id,
+            count: rows.length,
+            has_more: queryResult.has_more,
+            next_cursor: queryResult.next_cursor,
+            rows
+          });
+        }
         if (
-  name === "query_database"
-) {
-  const pages = await queryAllDataSourcePages(
-    args.data_source_id
-  );
-  const rows = pages.map(convertPageToRow);
-  return toolResult({
-    success: true,
-    data_source_id: args.data_source_id,
-    count: rows.length,
-    rows
-  });
-}
-
+          name === "query_database"
+        ) {
+          const queryResult = await queryAllDataSourcePages(
+            args.data_source_id
+          );
+          const rows = queryResult.pages.map(convertPageToRow);
+          return toolResult({
+            success: true,
+            data_source_id: args.data_source_id,
+            count: rows.length,
+            has_more: queryResult.has_more,
+            next_cursor: queryResult.next_cursor,
+            rows
+          });
+        }
         if (
           name === "get_record" ||
           name === "read_page"
         ) {
           const page =
-            await notion.pages.retrieve(
+            await withRetry(() => notion.pages.retrieve(
               {
                 page_id:
                   args.page_id
               }
-            );
-
+            ));
           if (
             !page ||
             page.object !== "page"
@@ -2034,12 +2052,11 @@ let rows = pages.map(convertPageToRow);
               "The supplied ID is not a Notion page."
             );
           }
-
           const blocks =
             await fetchPageBlocks(
-              args.page_id
+              args.page_id,
+              !!args.recursive
             );
-
           const result = {
             id: page.id,
             url:
@@ -2051,7 +2068,6 @@ let rows = pages.map(convertPageToRow);
             properties: {},
             blocks
           };
-
           for (
             const key of Object.keys(
               page.properties || {}
@@ -2064,12 +2080,10 @@ let rows = pages.map(convertPageToRow);
                 page.properties[key]
               );
           }
-
           return toolResult(
             result
           );
         }
-
         if (
           name === "create_record" ||
           name === "create_page"
@@ -2079,30 +2093,26 @@ let rows = pages.map(convertPageToRow);
             (
               args.database
                 ? (
-                    await resolveDataSource(
-                      args.database
-                    )
-                  ).data_source_id
+                  await resolveDataSource(
+                    args.database
+                  )
+                ).data_source_id
                 : null
             );
-
           if (!dataSourceId) {
             throw new Error(
               "Provide database or data_source_id."
             );
           }
-
           const schema =
             await getDataSourceSchema(
               dataSourceId
             );
-
           const properties =
             buildSchemaAwareProperties(
               args.properties,
               schema
             );
-
           const payload = {
             parent: {
               type:
@@ -2112,7 +2122,6 @@ let rows = pages.map(convertPageToRow);
             },
             properties
           };
-
           if (
             Array.isArray(
               args.children
@@ -2122,18 +2131,15 @@ let rows = pages.map(convertPageToRow);
             payload.children =
               args.children;
           }
-
           const response =
-            await notion.pages.create(
+            await withRetry(() => notion.pages.create(
               payload
-            );
-
+            ));
           if (args.content) {
             const blocks =
               markdownToBlocks(
                 args.content
               );
-
             if (
               blocks.length > 0
             ) {
@@ -2143,14 +2149,12 @@ let rows = pages.map(convertPageToRow);
               );
             }
           }
-
           const verification =
             await verifyPage(
               response.id,
               args.properties,
               schema
             );
-
           if (
             !verification.verified
           ) {
@@ -2172,7 +2176,6 @@ let rows = pages.map(convertPageToRow);
                 verification.actual
             });
           }
-
           return toolResult({
             success: true,
             operation:
@@ -2189,66 +2192,140 @@ let rows = pages.map(convertPageToRow);
               "Record created and verified successfully."
           });
         }
-
+        if (name === "create_records_batch") {
+          const dataSourceId =
+            args.data_source_id ||
+            (
+              args.database
+                ? (
+                  await resolveDataSource(
+                    args.database
+                  )
+                ).data_source_id
+                : null
+            );
+          if (!dataSourceId) {
+            throw new Error(
+              "Provide database or data_source_id."
+            );
+          }
+          const records = Array.isArray(args.records) ? args.records : [];
+          if (records.length === 0) {
+            throw new Error("records array is empty.");
+          }
+          if (records.length > 50) {
+            throw new Error("Maximum 50 records per batch.");
+          }
+          const schema =
+            await getDataSourceSchema(
+              dataSourceId
+            );
+          const results = [];
+          for (let index = 0; index < records.length; index++) {
+            const rec = records[index] || {};
+            try {
+              const properties =
+                buildSchemaAwareProperties(
+                  rec.properties || {},
+                  schema
+                );
+              const payload = {
+                parent: {
+                  type: "data_source_id",
+                  data_source_id: dataSourceId
+                },
+                properties
+              };
+              const created =
+                await withRetry(() => notion.pages.create(payload));
+              if (rec.content) {
+                const blocks = markdownToBlocks(rec.content);
+                if (blocks.length > 0) {
+                  await appendBlocksInChunks(created.id, blocks);
+                }
+              }
+              const verification =
+                await verifyPage(
+                  created.id,
+                  rec.properties || {},
+                  schema
+                );
+              results.push({
+                index,
+                success: verification.verified,
+                id: created.id,
+                url: created.url || null,
+                verified: verification.verified,
+                mismatches: verification.mismatches
+              });
+            } catch (error) {
+              results.push({
+                index,
+                success: false,
+                error: error?.message || String(error)
+              });
+            }
+          }
+          const successCount = results.filter((r) => r.success).length;
+          return toolResult({
+            success: successCount === results.length,
+            total: results.length,
+            succeeded: successCount,
+            failed: results.length - successCount,
+            results
+          });
+        }
         if (
           name === "update_record" ||
           name === "update_page"
         ) {
           const current =
-            await notion.pages.retrieve(
+            await withRetry(() => notion.pages.retrieve(
               {
                 page_id:
                   args.page_id
               }
-            );
-
+            ));
           if (
             !current ||
             current.object !==
-              "page"
+            "page"
           ) {
             throw new Error(
               "The supplied ID is not a Notion page."
             );
           }
-
           const dataSourceId =
             current.parent
               ?.data_source_id;
-
           if (!dataSourceId) {
             throw new Error(
               "This page is not a database row with a resolvable data_source_id."
             );
           }
-
           const schema =
             await getDataSourceSchema(
               dataSourceId
             );
-
           const properties =
             buildSchemaAwareProperties(
               args.properties,
               schema
             );
-
           const response =
-            await notion.pages.update(
+            await withRetry(() => notion.pages.update(
               {
                 page_id:
                   args.page_id,
                 properties
               }
-            );
-
+            ));
           const verification =
             await verifyPage(
               response.id,
               args.properties,
               schema
             );
-
           if (
             !verification.verified
           ) {
@@ -2270,7 +2347,6 @@ let rows = pages.map(convertPageToRow);
                 verification.actual
             });
           }
-
           return toolResult({
             success: true,
             operation:
@@ -2287,50 +2363,43 @@ let rows = pages.map(convertPageToRow);
               "Record updated and verified successfully."
           });
         }
-
         if (
           name === "verify_record"
         ) {
           const current =
-            await notion.pages.retrieve(
+            await withRetry(() => notion.pages.retrieve(
               {
                 page_id:
                   args.page_id
               }
-            );
-
+            ));
           if (
             !current ||
             current.object !==
-              "page"
+            "page"
           ) {
             throw new Error(
               "The supplied ID is not a Notion page."
             );
           }
-
           const dataSourceId =
             current.parent
               ?.data_source_id;
-
           if (!dataSourceId) {
             throw new Error(
               "The page has no data_source_id."
             );
           }
-
           const schema =
             await getDataSourceSchema(
               dataSourceId
             );
-
           const verification =
             await verifyPage(
               args.page_id,
               args.properties,
               schema
             );
-
           return toolResult({
             success: true,
             verified:
@@ -2345,44 +2414,62 @@ let rows = pages.map(convertPageToRow);
               verification.actual
           });
         }
-
+        if (name === "delete_record") {
+          const current =
+            await withRetry(() => notion.pages.retrieve({
+              page_id: args.page_id
+            }));
+          if (!current || current.object !== "page") {
+            throw new Error("The supplied ID is not a Notion page.");
+          }
+          const title = extractTitleFromPage(current);
+          const response =
+            await withRetry(() => notion.pages.update({
+              page_id: args.page_id,
+              archived: true
+            }));
+          return toolResult({
+            success: true,
+            operation: "archived",
+            id: response.id,
+            title: title,
+            url: response.url || null,
+            archived: true,
+            message: "Record archived successfully. It can be restored from Notion's trash."
+          });
+        }
         if (
           name === "upsert_record"
         ) {
           const resolved =
             args.data_source_id
               ? {
-                  data_source_id:
-                    args.data_source_id,
-                  schema:
-                    await getDataSourceSchema(
-                      args.data_source_id
-                    )
-                }
+                data_source_id:
+                  args.data_source_id,
+                schema:
+                  await getDataSourceSchema(
+                    args.data_source_id
+                  )
+              }
               : await resolveDataSource(
-                  args.database
-                );
-
+                args.database
+              );
           const schema =
             resolved.schema;
-
           buildSchemaAwareProperties(
             args.match,
             schema
           );
-
           buildSchemaAwareProperties(
             args.properties,
             schema
           );
-
-          const rows =
+          const queryResult =
             await queryAllDataSourcePages(
               resolved.data_source_id
             );
-
           const match =
-            rows.find(
+            queryResult.pages.find(
               (page) => {
                 for (
                   const key of Object.keys(
@@ -2391,22 +2478,19 @@ let rows = pages.map(convertPageToRow);
                 ) {
                   const schemaProperty =
                     schema.properties?.[
-                      key
+                    key
                     ];
-
                   if (
                     !schemaProperty
                   ) {
                     return false;
                   }
-
                   const actual =
                     extractPropertyValue(
                       page.properties?.[
-                        key
+                      key
                       ]
                     );
-
                   if (
                     !valuesEqual(
                       args.match[key],
@@ -2417,33 +2501,28 @@ let rows = pages.map(convertPageToRow);
                     return false;
                   }
                 }
-
                 return true;
               }
             );
-
           if (match) {
             const properties =
               buildSchemaAwareProperties(
                 args.properties,
                 schema
               );
-
             const updated =
-              await notion.pages.update(
+              await withRetry(() => notion.pages.update(
                 {
                   page_id:
                     match.id,
                   properties
                 }
-              );
-
+              ));
             if (args.content) {
               const blocks =
                 markdownToBlocks(
                   args.content
                 );
-
               if (
                 blocks.length > 0
               ) {
@@ -2453,14 +2532,12 @@ let rows = pages.map(convertPageToRow);
                 );
               }
             }
-
             const verification =
               await verifyPage(
                 updated.id,
                 args.properties,
                 schema
               );
-
             return toolResult({
               success:
                 verification.verified,
@@ -2483,13 +2560,11 @@ let rows = pages.map(convertPageToRow);
                   : "Existing record was updated but verification failed."
             });
           }
-
           const properties =
             buildSchemaAwareProperties(
               args.properties,
               schema
             );
-
           const payload = {
             parent: {
               type:
@@ -2499,18 +2574,15 @@ let rows = pages.map(convertPageToRow);
             },
             properties
           };
-
           const created =
-            await notion.pages.create(
+            await withRetry(() => notion.pages.create(
               payload
-            );
-
+            ));
           if (args.content) {
             const blocks =
               markdownToBlocks(
                 args.content
               );
-
             if (
               blocks.length > 0
             ) {
@@ -2520,14 +2592,12 @@ let rows = pages.map(convertPageToRow);
               );
             }
           }
-
           const verification =
             await verifyPage(
               created.id,
               args.properties,
               schema
             );
-
           return toolResult({
             success:
               verification.verified,
@@ -2550,21 +2620,17 @@ let rows = pages.map(convertPageToRow);
                 : "New record was created but verification failed."
           });
         }
-
         /* ------------------------------ notes ------------------------------ */
-
         if (
           name === "append_note" ||
           name === "append_markdown"
         ) {
           const markdown =
             args.markdown;
-
           const blocks =
             markdownToBlocks(
               markdown
             );
-
           if (
             blocks.length === 0
           ) {
@@ -2572,13 +2638,11 @@ let rows = pages.map(convertPageToRow);
               "No content to append."
             );
           }
-
           const results =
             await appendBlocksInChunks(
               args.page_id,
               blocks
             );
-
           return toolResult({
             success: true,
             appended:
@@ -2587,7 +2651,6 @@ let rows = pages.map(convertPageToRow);
               "Content appended successfully."
           });
         }
-
         if (
           name === "append_blocks"
         ) {
@@ -2600,13 +2663,11 @@ let rows = pages.map(convertPageToRow);
               "blocks must be an array."
             );
           }
-
           const results =
             await appendBlocksInChunks(
               args.page_id,
               args.blocks
             );
-
           return toolResult({
             success: true,
             appended:
@@ -2614,18 +2675,15 @@ let rows = pages.map(convertPageToRow);
             results
           });
         }
-
         if (
           name === "update_block"
         ) {
           const payload = {};
-
           payload[
             args.type
           ] = args.block;
-
           const response =
-            await notion.blocks.update(
+            await withRetry(() => notion.blocks.update(
               {
                 block_id:
                   args.block_id,
@@ -2633,22 +2691,19 @@ let rows = pages.map(convertPageToRow);
                   args.type,
                 ...payload
               }
-            );
-
+            ));
           return toolResult({
             success: true,
             block:
               response
           });
         }
-
         /* ---------------------------- databases ---------------------------- */
-
         if (
           name === "create_database"
         ) {
           const response =
-            await notion.databases.create(
+            await withRetry(() => notion.databases.create(
               {
                 parent: {
                   type:
@@ -2672,8 +2727,7 @@ let rows = pages.map(convertPageToRow);
                     {}
                 }
               }
-            );
-
+            ));
           return toolResult({
             success: true,
             database_id:
@@ -2688,13 +2742,12 @@ let rows = pages.map(convertPageToRow);
               "Database created successfully."
           });
         }
-
         if (
           name ===
           "update_database_schema"
         ) {
           const response =
-            await notion.dataSources.update(
+            await withRetry(() => notion.dataSources.update(
               {
                 data_source_id:
                   args.data_source_id,
@@ -2702,8 +2755,8 @@ let rows = pages.map(convertPageToRow);
                   args.properties ||
                   {}
               }
-            );
-
+            ));
+          setCachedSchema(args.data_source_id, response);
           return toolResult({
             success: true,
             data_source_id:
@@ -2712,7 +2765,6 @@ let rows = pages.map(convertPageToRow);
               response
           });
         }
-
         throw new Error(
           "Unknown tool: " + name
         );
@@ -2721,7 +2773,6 @@ let rows = pages.map(convertPageToRow);
           "[MCP] TOOL ERROR:",
           error
         );
-
         return toolError(
           error
         );
@@ -2732,14 +2783,12 @@ let rows = pages.map(convertPageToRow);
       }
     }
   );
-
   return server;
 }
 
 /* -------------------------------------------------------------------------- */
 /* HTTP / SSE                                                                 */
 /* -------------------------------------------------------------------------- */
-
 app.get(
   "/",
   (req, res) => {
@@ -2753,9 +2802,17 @@ app.get(
         SERVER_VERSION,
       capabilities: [
         "schema-aware record create/update",
+        "batch record creation",
+        "soft delete (archive)",
         "upsert",
         "read-after-write verification",
         "database discovery by name",
+        "full pagination (400+ records)",
+        "schema caching",
+        "retry on rate limits",
+        "fuzzy search",
+        "recursive page blocks",
+        "markdown inline styles",
         "relations",
         "people",
         "markdown page content"
@@ -2770,20 +2827,16 @@ app.get(
     console.log(
       "[MCP] New SSE connection"
     );
-
     try {
       const server =
         await createMcpServer();
-
       const transport =
         new SSEServerTransport(
           "/messages",
           res
         );
-
       const sessionId =
         transport.sessionId;
-
       sessions.set(
         sessionId,
         {
@@ -2791,12 +2844,10 @@ app.get(
           server
         }
       );
-
       console.log(
         "[MCP] SSE session:",
         sessionId
       );
-
       res.on(
         "close",
         async () => {
@@ -2804,11 +2855,9 @@ app.get(
             "[MCP] SSE closed:",
             sessionId
           );
-
           sessions.delete(
             sessionId
           );
-
           try {
             await server.close();
           } catch (error) {
@@ -2819,7 +2868,6 @@ app.get(
           }
         }
       );
-
       await server.connect(
         transport
       );
@@ -2828,7 +2876,6 @@ app.get(
         "[MCP] SSE ERROR:",
         error
       );
-
       if (
         !res.headersSent
       ) {
@@ -2846,42 +2893,35 @@ app.post(
   async (req, res) => {
     const sessionId =
       req.query.sessionId;
-
     console.log(
       "[MCP] POST /messages session:",
       sessionId
     );
-
     if (!sessionId) {
       return res.status(400).json({
         error:
           "Missing sessionId"
       });
     }
-
     const session =
       sessions.get(
         sessionId
       );
-
     if (!session) {
       return res.status(404).json({
         error:
           "Session not found"
       });
     }
-
     try {
       console.log(
         "[MCP] POST /messages body received"
       );
-
       await session.transport.handlePostMessage(
         req,
         res,
         req.body
       );
-
       console.log(
         "[MCP] POST /messages handled"
       );
@@ -2890,7 +2930,6 @@ app.post(
         "[MCP] MESSAGE ERROR:",
         error
       );
-
       if (
         !res.headersSent
       ) {
