@@ -1942,22 +1942,12 @@ async function createMcpServer() {
               100
             );
 
-          const response =
-            await notion.dataSources.query(
-              {
-                data_source_id:
-                  resolved.data_source_id,
-                page_size:
-                  pageSize
-              }
-            );
+          const pages = await queryAllDataSourcePages(
+  resolved.data_source_id,
+  pageSize
+);
 
-          let rows =
-            (
-              response.results || []
-            ).map(
-              convertPageToRow
-            );
+let rows = pages.map(convertPageToRow);
 
           const filters =
             args.filters || {};
